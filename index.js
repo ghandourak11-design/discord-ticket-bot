@@ -16,6 +16,7 @@ const {
   SlashCommandBuilder,
 } = require("discord.js");
 
+/* -------------------- INVITE DATA (simple JSON) -------------------- */
 const DATA_FILE = path.join(__dirname, "invites_data.json");
 
 function loadData() {
@@ -23,12 +24,11 @@ function loadData() {
     return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
   } catch {
     return {
-      inviterStats: {},    // inviterId -> { joins, rejoins, left, manual }
-      memberInviter: {},   // memberId -> inviterId
+      inviterStats: {}, // inviterId -> { joins, rejoins, left, manual }
+      memberInviter: {}, // memberId -> inviterId
     };
   }
 }
-
 function saveData(d) {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2));
@@ -36,21 +36,22 @@ function saveData(d) {
     console.error("Failed to save data:", e.message);
   }
 }
-
 const data = loadData();
 
+/* -------------------- CLIENT -------------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMembers, // invite tracking + join/leave
   ],
   partials: [Partials.Channel],
 });
 
 const PREFIX = "!";
 
+/* -------------------- TICKET SETUP -------------------- */
 const CATEGORIES = {
   SELL: "Sell to Us",
   SUPPORT: "Help & Support",
@@ -59,10 +60,10 @@ const CATEGORIES = {
 };
 
 const ticketMap = {
-  ticket_open_sell: { key: "sell-to-us", label: "Sell to Us", category: CATEGORIES.SELL },
-  ticket_open_claim: { key: "claim-order", label: "Claim Order", category: CATEGORIES.CLAIM },
-  ticket_open_rewards: { key: "rewards", label: "Rewards", category: CATEGORIES.REWARDS },
   ticket_open_support: { key: "help-support", label: "Help & Support", category: CATEGORIES.SUPPORT },
+  ticket_open_claim: { key: "claim-order", label: "Claim Order", category: CATEGORIES.CLAIM },
+  ticket_open_sell: { key: "sell-to-us", label: "Sell to Us", category: CATEGORIES.SELL },
+  ticket_open_rewards: { key: "claim-rewards", label: "Claim Rewards Ticket", category: CATEGORIES.REWARDS },
 };
 
 function cleanName(str) {
@@ -95,7 +96,13 @@ function isTicketChannel(channel) {
   return Boolean(getOpenerIdFromTopic(channel.topic));
 }
 
-// ---- INVITES TRACKING ----
+/**
+ * We’ll track which channels are waiting for "What do you need?" answers
+ * so we don’t create multiple collectors.
+ */
+const pendingNeedAnswer = new Set();
+
+/* -------------------- INVITE TRACKING -------------------- */
 const invitesCache = new Map(); // guildId -> Map(inviteCode -> uses)
 
 async function refreshInvitesForGuild(guild) {
@@ -119,18 +126,18 @@ function ensureInviter(inviterId) {
 }
 
 function stillInServerCount(userId) {
-  const stats = ensureInviter(userId);
-  const base = (stats.joins || 0) + (stats.rejoins || 0) - (stats.left || 0);
-  return Math.max(0, base + (stats.manual || 0));
+  const s = ensureInviter(userId);
+  const base = (s.joins || 0) + (s.rejoins || 0) - (s.left || 0);
+  return Math.max(0, base + (s.manual || 0));
 }
 
-// ---- SLASH COMMANDS ----
+/* -------------------- SLASH COMMANDS -------------------- */
 async function registerSlashCommands() {
   const token = process.env.TOKEN;
   const guildId = process.env.GUILD_ID;
 
   if (!token) throw new Error("Missing TOKEN env var.");
-  if (!guildId) throw new Error("Missing GUILD_ID env var (needed for slash commands).");
+  if (!guildId) throw new Error("Missing GUILD_ID env var.");
 
   const commands = [
     new SlashCommandBuilder()
@@ -149,9 +156,7 @@ async function registerSlashCommands() {
       .setName("addinvites")
       .setDescription("Add invites to a user's still-in-server count.")
       .addUserOption((opt) => opt.setName("user").setDescription("User").setRequired(true))
-      .addIntegerOption((opt) =>
-        opt.setName("amount").setDescription("How many invites to add").setRequired(true)
-      ),
+      .addIntegerOption((opt) => opt.setName("amount").setDescription("How many to add").setRequired(true)),
 
     new SlashCommandBuilder()
       .setName("resetinvites")
@@ -173,51 +178,60 @@ client.once("ready", async () => {
     console.error("❌ Slash command registration failed:", e.message);
   }
 
+  // Prime invites cache
   try {
-    const guildId = process.env.GUILD_ID;
-    const guild = client.guilds.cache.get(guildId);
-    if (guild) {
-      await refreshInvitesForGuild(guild);
-      console.log("✅ Invite cache primed.");
-    }
+    const guild = client.guilds.cache.get(process.env.GUILD_ID);
+    if (guild) await refreshInvitesForGuild(guild);
   } catch (e) {
     console.error("❌ Could not fetch invites (need Manage Server permission):", e.message);
   }
 });
 
-// ---- TEXT COMMANDS ----
+/* -------------------- TEXT COMMANDS -------------------- */
 client.on("messageCreate", async (message) => {
   try {
     if (message.author.bot || !message.guild) return;
     if (!message.content.startsWith(PREFIX)) return;
 
     const cmd = message.content.slice(PREFIX.length).split(" ")[0].toLowerCase();
-    const text = message.content.slice(PREFIX.length + cmd.length + 1);
+    const text = message.content.slice(PREFIX.length + cmd.length + 1); // preserve formatting
 
+    // !embed <text>
     if (cmd === "embed") {
       if (!text || !text.trim()) return message.reply("Usage: `!embed <text>`");
       const embed = new EmbedBuilder().setDescription(text).setColor(0x2b2d31);
       return message.channel.send({ embeds: [embed] });
     }
 
+    // !ticketpanel
     if (cmd === "ticketpanel") {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("You need **Administrator** to post the ticket panel.");
       }
 
+      const panelText =
+        "🆘 | Help & Support Ticket\n" +
+        "If you need help with anything, create a support ticket.\n\n" +
+        "💰 | Claim Order\n" +
+        "If you have placed an order and are waiting to receive it please open this ticket.\n\n" +
+        "💸| Sell To us\n" +
+        "Want to make some real cash of the donutsmp? Open a ticket and sell to us here.\n\n" +
+        "🎁 | Claim Rewards Ticket\n" +
+        "Looking to claim rewards, make this ticket.";
+
       const embed = new EmbedBuilder()
         .setTitle("Tickets")
-        .setDescription("Choose what you need below:")
+        .setDescription(panelText)
         .setColor(0x2b2d31);
 
       const row1 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("ticket_open_sell").setLabel("Sell to Us").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("ticket_open_support").setLabel("Help & Support").setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId("ticket_open_claim").setLabel("Claim Order").setStyle(ButtonStyle.Success)
       );
 
       const row2 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("ticket_open_rewards").setLabel("Rewards").setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId("ticket_open_support").setLabel("Help & Support").setStyle(ButtonStyle.Danger)
+        new ButtonBuilder().setCustomId("ticket_open_sell").setLabel("Sell to Us").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("ticket_open_rewards").setLabel("Rewards").setStyle(ButtonStyle.Danger)
       );
 
       return message.channel.send({ embeds: [embed], components: [row1, row2] });
@@ -227,10 +241,10 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// ---- INTERACTIONS ----
+/* -------------------- INTERACTIONS -------------------- */
 client.on("interactionCreate", async (interaction) => {
   try {
-    // BUTTON ticket creation
+    /* -------- Buttons -> Create Ticket + Ask "What do you need?" -------- */
     if (interaction.isButton() && interaction.guild) {
       if (!(interaction.customId in ticketMap)) return;
 
@@ -245,6 +259,7 @@ client.on("interactionCreate", async (interaction) => {
       const usernameSlug = cleanName(member.user.username) || member.user.id;
       const channelName = `${info.key}-${usernameSlug}`.slice(0, 90);
 
+      // Prevent duplicates per type per user inside that category
       const existing = guild.channels.cache.find(
         (c) =>
           c.type === ChannelType.GuildText &&
@@ -273,16 +288,46 @@ client.on("interactionCreate", async (interaction) => {
         ],
       });
 
-      const intro = new EmbedBuilder()
+      // Ask question
+      const askEmbed = new EmbedBuilder()
         .setTitle(`${info.label} (${member.user.username})`)
-        .setDescription(`Explain what you need.\nClose with: **/close reason:<your reason>**`)
+        .setDescription("**What do you need?**\nReply in this channel with your answer.")
         .setColor(0x2b2d31);
 
-      await channel.send({ content: `${member}`, embeds: [intro] });
+      await channel.send({ content: `${member}`, embeds: [askEmbed] });
+
+      // Set up collector for ONE answer from opener
+      pendingNeedAnswer.add(channel.id);
+
+      const filter = (m) => m.author.id === member.user.id && m.channel.id === channel.id;
+      const collector = channel.createMessageCollector({ filter, max: 1, time: 5 * 60 * 1000 });
+
+      collector.on("collect", async (m) => {
+        // Post their answer into an embed
+        const answerEmbed = new EmbedBuilder()
+          .setTitle("Ticket Details")
+          .addFields(
+            { name: "User", value: `${member.user.tag}`, inline: true },
+            { name: "Type", value: info.label, inline: true },
+            { name: "What they need", value: m.content.slice(0, 1024) || "(no text)", inline: false }
+          )
+          .setColor(0x2b2d31);
+
+        await channel.send({ embeds: [answerEmbed] });
+        pendingNeedAnswer.delete(channel.id);
+      });
+
+      collector.on("end", async (collected) => {
+        if (collected.size === 0 && pendingNeedAnswer.has(channel.id)) {
+          pendingNeedAnswer.delete(channel.id);
+          await channel.send("⏰ No answer received. If you still need help, type your message here anyway.");
+        }
+      });
+
       return interaction.editReply({ content: `✅ Ticket created: ${channel}` });
     }
 
-    // SLASH: /close
+    /* -------- /close reason:<text> -------- */
     if (interaction.isChatInputCommand() && interaction.commandName === "close") {
       if (!interaction.guild) return;
 
@@ -320,26 +365,23 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // SLASH: /invites (regular message)
+    /* -------- /invites user:<user>  (regular message, only still-in-server count) -------- */
     if (interaction.isChatInputCommand() && interaction.commandName === "invites") {
       const user = interaction.options.getUser("user", true);
       const still = stillInServerCount(user.id);
-
       return interaction.reply({
         content: `📨 **${user.tag}** has **${still}** invites still in the server.`,
       });
     }
 
-    // SLASH: /addinvites (staff-only)
+    /* -------- /addinvites user amount  (staff-only) -------- */
     if (interaction.isChatInputCommand() && interaction.commandName === "addinvites") {
       const member = await interaction.guild.members.fetch(interaction.user.id);
       const isStaff =
         member.permissions.has(PermissionsBitField.Flags.Administrator) ||
         member.permissions.has(PermissionsBitField.Flags.ManageGuild);
 
-      if (!isStaff) {
-        return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
-      }
+      if (!isStaff) return interaction.reply({ content: "No permission.", ephemeral: true });
 
       const user = interaction.options.getUser("user", true);
       const amount = interaction.options.getInteger("amount", true);
@@ -349,39 +391,33 @@ client.on("interactionCreate", async (interaction) => {
       saveData(data);
 
       const still = stillInServerCount(user.id);
-
       return interaction.reply({
-        content: `✅ Added **${amount}** invites to **${user.tag}**. Now: **${still}** invites still in server.`,
+        content: `✅ Added **${amount}** to **${user.tag}**. Now: **${still}** invites still in server.`,
       });
     }
 
-    // SLASH: /resetinvites (staff-only)
+    /* -------- /resetinvites user  (staff-only) -------- */
     if (interaction.isChatInputCommand() && interaction.commandName === "resetinvites") {
       const member = await interaction.guild.members.fetch(interaction.user.id);
       const isStaff =
         member.permissions.has(PermissionsBitField.Flags.Administrator) ||
         member.permissions.has(PermissionsBitField.Flags.ManageGuild);
 
-      if (!isStaff) {
-        return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
-      }
+      if (!isStaff) return interaction.reply({ content: "No permission.", ephemeral: true });
 
       const user = interaction.options.getUser("user", true);
 
-      // Reset stats (keeps memberInviter mapping for rejoin detection if you want; but stats reset is what you asked)
       data.inviterStats[user.id] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
       saveData(data);
 
-      return interaction.reply({
-        content: `✅ Reset invite stats for **${user.tag}** to **0**.`,
-      });
+      return interaction.reply({ content: `✅ Reset invite stats for **${user.tag}**.` });
     }
   } catch (e) {
     console.error(e);
   }
 });
 
-// ---- MEMBER JOIN/LEAVE (INVITES) ----
+/* -------------------- INVITE JOIN/LEAVE -------------------- */
 client.on("guildMemberAdd", async (member) => {
   try {
     const guild = member.guild;
