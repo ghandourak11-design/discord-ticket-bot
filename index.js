@@ -1,12 +1,13 @@
 /**
- * FINAL FULL index.js (one last time)
+ * FINAL FULL index.js (with /generate added)
  *
  * ✅ Slash commands:
  *   /vouches
  *   /invites <user>                 -> ONLY shows invites still in server
+ *   /generate                       -> creates YOUR personal discord invite link (ephemeral) + button
  *   /addinvites <user> <amount>     -> Admin only
  *   /resetinvites <user>            -> ONLY allowed role IDs (NOT admins unless they also have one of these roles)
- *   /resetall                        -> Admin only
+ *   /resetall                       -> Admin only
  *   /close <reason>                 -> opener OR staff roles OR admin
  *   /giveaway <duration> <winners> <prize> -> staff roles OR admin, join button
  *
@@ -43,6 +44,14 @@
  * REQUIRED Dev Portal intents:
  *   - Server Members Intent
  *   - Message Content Intent (for ! commands + link filter)
+ *
+ * REQUIRED bot permissions (recommended):
+ *   - Manage Server (invites)
+ *   - Create Instant Invite (for /generate)
+ *   - Manage Roles (create automod role)
+ *   - Manage Channels (tickets)
+ *   - Manage Messages (purge + sticky)
+ *   - Kick/Ban Members (if using !kick/!ban)
  */
 
 require("dotenv").config();
@@ -85,7 +94,7 @@ const STAFF_ROLE_IDS = [
   "1464012365472337990",
 ];
 
-// ONLY these roles can /resetinvites (admins do NOT bypass unless they also have one of these)
+// ONLY these roles can /resetinvites (admins do NOT bypass unless they also have one of these roles)
 const RESETINVITES_ROLE_IDS = [
   "1465888170531881123",
   "1457184344538874029",
@@ -368,7 +377,6 @@ function isTicketChannel(channel) {
   return channel && channel.type === ChannelType.GuildText && Boolean(getOpenerIdFromTopic(channel.topic));
 }
 
-// 1 ticket per user total
 function findOpenTicketChannel(guild, openerId) {
   return guild.channels.cache.find((c) => {
     if (c.type !== ChannelType.GuildText) return false;
@@ -393,6 +401,10 @@ async function registerSlashCommands() {
       .setName("invites")
       .setDescription("Shows invites still in the server for a user.")
       .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName("generate")
+      .setDescription("Generate your personal invite link (joins count for you)."),
 
     new SlashCommandBuilder()
       .setName("addinvites")
@@ -561,7 +573,6 @@ client.on("interactionCreate", async (interaction) => {
 
     /* ---------- Ticket Buttons -> Modal ---------- */
     if (interaction.isButton() && interaction.customId in TICKET_TYPES) {
-      // 1 ticket per user: block opening modal if already has ticket
       const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
       if (existing) {
         return interaction.reply({ content: `❌ You already have an open ticket: ${existing}`, ephemeral: true });
@@ -597,7 +608,6 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith("ticket_modal:")) {
       await interaction.deferReply({ ephemeral: true });
 
-      // 1 ticket per user: final check (race condition safe)
       const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
       if (existing) {
         return interaction.editReply(`❌ You already have an open ticket: ${existing}`);
@@ -685,6 +695,35 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply(`📨 **${user.tag}** has **${count}** invites still in the server.`);
       }
 
+      if (name === "generate") {
+        const me = await interaction.guild.members.fetchMe();
+        const canCreate = interaction.channel.permissionsFor(me)?.has(PermissionsBitField.Flags.CreateInstantInvite);
+
+        if (!canCreate) {
+          return interaction.reply({
+            content: "❌ I need **Create Invite** permission in this channel to generate an invite.",
+            ephemeral: true,
+          });
+        }
+
+        const invite = await interaction.channel.createInvite({
+          maxAge: 0,
+          maxUses: 0,
+          unique: true,
+          reason: `Invite generated for ${interaction.user.tag}`,
+        });
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel("Open Invite").setURL(invite.url)
+        );
+
+        return interaction.reply({
+          content: `✅ Here’s your personal invite link (joins count for you):\n${invite.url}\n\nTip: Right-click / tap-and-hold → **Copy Link**.`,
+          components: [row],
+          ephemeral: true,
+        });
+      }
+
       if (name === "addinvites") {
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
           return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
@@ -700,10 +739,8 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (name === "resetinvites") {
-        // ONLY those roles. Admin does NOT automatically bypass.
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const allowed = memberHasAnyRole(member, RESETINVITES_ROLE_IDS);
-
         if (!allowed) {
           return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
         }
@@ -716,7 +753,6 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (name === "resetall") {
-        // Admin ONLY
         const member = await interaction.guild.members.fetch(interaction.user.id);
         if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
           return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
@@ -759,7 +795,6 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (name === "giveaway") {
-        // staff roles OR admin
         const member = await interaction.guild.members.fetch(interaction.user.id);
         if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
 
@@ -856,10 +891,7 @@ client.on("messageCreate", async (message) => {
       }
 
       if (cmd === "ticketpanel") {
-        const embed = new EmbedBuilder()
-          .setTitle("Tickets")
-          .setDescription(TICKET_PANEL_TEXT)
-          .setColor(0x2b2d31);
+        const embed = new EmbedBuilder().setTitle("Tickets").setDescription(TICKET_PANEL_TEXT).setColor(0x2b2d31);
 
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId("ticket_support").setLabel("Help & Support").setStyle(ButtonStyle.Primary),
@@ -929,7 +961,7 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    // Sticky behavior (after every message)
+    // Sticky behavior
     const sticky = stickyByChannel.get(message.channel.id);
     if (sticky) {
       if (sticky.messageId && message.id === sticky.messageId) return;
