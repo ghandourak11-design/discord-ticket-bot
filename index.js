@@ -1,3 +1,50 @@
+/**
+ * FINAL FULL index.js (one last time)
+ *
+ * ✅ Slash commands:
+ *   /vouches
+ *   /invites <user>                 -> ONLY shows invites still in server
+ *   /addinvites <user> <amount>     -> Admin only
+ *   /resetinvites <user>            -> ONLY allowed role IDs (NOT admins unless they also have one of these roles)
+ *   /resetall                        -> Admin only
+ *   /close <reason>                 -> opener OR staff roles OR admin
+ *   /giveaway <duration> <winners> <prize> -> staff roles OR admin, join button
+ *
+ * ✅ Message commands (Admin-only):
+ *   !embed <text>
+ *   !ticketpanel
+ *   !stick <message>
+ *   !unstick
+ *   !ban <user>
+ *   !kick <user>
+ *   !purge <amount>
+ *
+ * ✅ Tickets:
+ *   - 4 buttons, each routes to different categories
+ *   - Modal asks:
+ *       1) Minecraft username
+ *       2) What do you need?
+ *   - 1 ticket per user total (any type)
+ *   - Staff roles (IDs below) can see all tickets
+ *
+ * ✅ Automod:
+ *   - Blocks links unless Admin OR has role named "automod" (auto-created)
+ *
+ * ✅ Invites:
+ *   - Tracks joins/rejoins/leaves/manual
+ *   - Join log message in JOIN_LOG_CHANNEL_ID:
+ *       <user> has been invited by <inviter> and now has <invites> invites.
+ *     where invites = still-in-server only
+ *
+ * REQUIRED ENV (Railway Variables):
+ *   TOKEN=...
+ *   GUILD_ID=...
+ *
+ * REQUIRED Dev Portal intents:
+ *   - Server Members Intent
+ *   - Message Content Intent (for ! commands + link filter)
+ */
+
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
@@ -30,6 +77,7 @@ const AUTOMOD_ROLE_NAME = "automod";
 const VOUCHES_CHANNEL_ID = "1455198053546983454";
 const JOIN_LOG_CHANNEL_ID = "1461947323541225704";
 
+// These roles can SEE tickets and can /close (staff)
 const STAFF_ROLE_IDS = [
   "1465888170531881123",
   "1457184344538874029",
@@ -37,7 +85,14 @@ const STAFF_ROLE_IDS = [
   "1464012365472337990",
 ];
 
-// Ticket button mapping -> category + key for channel naming
+// ONLY these roles can /resetinvites (admins do NOT bypass unless they also have one of these)
+const RESETINVITES_ROLE_IDS = [
+  "1465888170531881123",
+  "1457184344538874029",
+  "1456504229148758229",
+  "1464012365472337990",
+];
+
 const TICKET_TYPES = {
   ticket_support: { label: "Help & Support", category: "Help & Support", key: "help-support" },
   ticket_claim: { label: "Claim Order", category: "Claim Order", key: "claim-order" },
@@ -45,7 +100,17 @@ const TICKET_TYPES = {
   ticket_rewards: { label: "Rewards", category: "Rewards", key: "rewards" },
 };
 
-/* ===================== STORAGE FILES ===================== */
+const TICKET_PANEL_TEXT =
+  "🆘 | Help & Support Ticket\n" +
+  "If you need help with anything, create a support ticket.\n\n" +
+  "💰 | Claim Order\n" +
+  "If you have placed an order and are waiting to receive it please open this ticket.\n\n" +
+  "💸| Sell To us\n" +
+  "Want to make some real cash of the donutsmp? Open a ticket and sell to us here.\n\n" +
+  "🎁 | Claim Rewards Ticket\n" +
+  "Looking to claim rewards, make this ticket.";
+
+/* ===================== STORAGE ===================== */
 
 const DATA_DIR = __dirname;
 const INVITES_FILE = path.join(DATA_DIR, "invites_data.json");
@@ -66,12 +131,14 @@ function saveJson(file, data) {
   }
 }
 
-// inviterStats: inviterId -> { joins, rejoins, left, manual }
-// memberInviter: memberId -> inviterId (first join inviter)
-const invitesData = loadJson(INVITES_FILE, { inviterStats: {}, memberInviter: {} });
+const invitesData = loadJson(INVITES_FILE, {
+  inviterStats: {}, // inviterId -> { joins, rejoins, left, manual }
+  memberInviter: {}, // memberId -> inviterId
+});
 
-// giveaways: gwId -> { id, guildId, channelId, messageId, prize, winners, hostId, endsAt, entries[], ended }
-const giveawayData = loadJson(GIVEAWAYS_FILE, { giveaways: {} });
+const giveawayData = loadJson(GIVEAWAYS_FILE, {
+  giveaways: {}, // gwId -> giveaway
+});
 
 /* ===================== CLIENT ===================== */
 
@@ -79,14 +146,14 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildInvites,
-    GatewayIntentBits.GuildMembers, // needed for join/leave tracking
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Channel],
 });
 
-/* ===================== UTILS ===================== */
+/* ===================== HELPERS ===================== */
 
 function cleanName(str) {
   return (str || "")
@@ -97,20 +164,20 @@ function cleanName(str) {
     .slice(0, 24);
 }
 
+function parseUserId(arg) {
+  if (!arg) return null;
+  const mention = arg.match(/^<@!?(\d{10,25})>$/);
+  if (mention) return mention[1];
+  const id = arg.match(/^(\d{10,25})$/);
+  if (id) return id[1];
+  return null;
+}
+
 function containsLink(content) {
   if (!content) return false;
   const urlRegex = /(https?:\/\/\S+)|(www\.\S+)/i;
-  const discordInviteRegex = /(discord\.gg\/\S+)|(discord\.com\/invite\/\S+)/i;
-  return urlRegex.test(content) || discordInviteRegex.test(content);
-}
-
-function parseUserId(arg) {
-  if (!arg) return null;
-  const mentionMatch = arg.match(/^<@!?(\d{10,25})>$/);
-  if (mentionMatch) return mentionMatch[1];
-  const idMatch = arg.match(/^(\d{10,25})$/);
-  if (idMatch) return idMatch[1];
-  return null;
+  const inviteRegex = /(discord\.gg\/\S+)|(discord\.com\/invite\/\S+)/i;
+  return urlRegex.test(content) || inviteRegex.test(content);
 }
 
 async function ensureAutoModRole(guild) {
@@ -135,15 +202,16 @@ function ensureInviterStats(inviterId) {
   if (!invitesData.inviterStats[inviterId]) {
     invitesData.inviterStats[inviterId] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
   } else {
-    invitesData.inviterStats[inviterId].joins ??= 0;
-    invitesData.inviterStats[inviterId].rejoins ??= 0;
-    invitesData.inviterStats[inviterId].left ??= 0;
-    invitesData.inviterStats[inviterId].manual ??= 0;
+    const s = invitesData.inviterStats[inviterId];
+    s.joins ??= 0;
+    s.rejoins ??= 0;
+    s.left ??= 0;
+    s.manual ??= 0;
   }
   return invitesData.inviterStats[inviterId];
 }
 
-// ONLY invites still in server (joins + rejoins - left + manual)
+// still in server ONLY
 function invitesStillInServer(inviterId) {
   const s = ensureInviterStats(inviterId);
   const base = (s.joins || 0) + (s.rejoins || 0) - (s.left || 0);
@@ -153,54 +221,23 @@ function invitesStillInServer(inviterId) {
 function saveInvites() {
   saveJson(INVITES_FILE, invitesData);
 }
-
-/* ===================== SLASH COMMAND REGISTRATION ===================== */
-
-async function registerSlashCommands() {
-  if (!process.env.TOKEN) throw new Error("Missing TOKEN");
-  if (!GUILD_ID) throw new Error("Missing GUILD_ID");
-
-  const commands = [
-    new SlashCommandBuilder().setName("vouches").setDescription("Shows how many vouches this server has."),
-    new SlashCommandBuilder()
-      .setName("invites")
-      .setDescription("Shows invites still in the server for a user.")
-      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName("addinvites")
-      .setDescription("Add invites to a user (manual).")
-      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true))
-      .addIntegerOption((o) => o.setName("amount").setDescription("Amount").setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName("resetinvites")
-      .setDescription("Reset a user's invite stats.")
-      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true)),
-
-    new SlashCommandBuilder().setName("resetall").setDescription("Reset invite stats for EVERYONE."),
-
-    new SlashCommandBuilder()
-      .setName("close")
-      .setDescription("Close the current ticket (DMs opener the reason).")
-      .addStringOption((o) => o.setName("reason").setDescription("Reason").setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName("giveaway")
-      .setDescription("Start a giveaway with a join button.")
-      .addStringOption((o) => o.setName("duration").setDescription("e.g. 30m 1h 2d").setRequired(true))
-      .addIntegerOption((o) => o.setName("winners").setDescription("How many winners").setRequired(true))
-      .addStringOption((o) => o.setName("prize").setDescription("Prize").setRequired(true)),
-  ].map((c) => c.toJSON());
-
-  const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
-  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
-  console.log("✅ Slash commands registered");
+function saveGiveaways() {
+  saveJson(GIVEAWAYS_FILE, giveawayData);
 }
 
-/* ===================== INVITE CACHE (for detecting inviter) ===================== */
+function memberHasAnyRole(member, roleIds) {
+  return roleIds.some((rid) => member.roles.cache.has(rid));
+}
 
-const invitesCache = new Map(); // guildId -> Map(code -> uses)
+function isStaff(member) {
+  if (!member) return false;
+  if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+  return memberHasAnyRole(member, STAFF_ROLE_IDS);
+}
+
+/* ===================== INVITE CACHE ===================== */
+
+const invitesCache = new Map(); // guildId -> Map(code->uses)
 
 async function refreshGuildInvites(guild) {
   const invites = await guild.invites.fetch();
@@ -252,10 +289,6 @@ function makeGiveawayEmbed(gw) {
         `Entries: **${gw.entries.length}**\n` +
         `Winners: **${gw.winners}**`
     );
-}
-
-function saveGiveaways() {
-  saveJson(GIVEAWAYS_FILE, giveawayData);
 }
 
 async function endGiveaway(gwId) {
@@ -312,19 +345,16 @@ function scheduleGiveawayEnd(gwId) {
   setTimeout(() => {
     const g = giveawayData.giveaways[gwId];
     if (!g || g.ended) return;
-    // re-schedule if huge delay
     if (g.endsAt - Date.now() > MAX) return scheduleGiveawayEnd(gwId);
     endGiveaway(gwId);
   }, Math.min(delay, MAX));
 }
 
-/* ===================== TICKETS HELPERS ===================== */
+/* ===================== TICKETS ===================== */
 
 async function getOrCreateCategory(guild, name) {
   let cat = guild.channels.cache.find((c) => c.type === ChannelType.GuildCategory && c.name === name);
-  if (!cat) {
-    cat = await guild.channels.create({ name, type: ChannelType.GuildCategory });
-  }
+  if (!cat) cat = await guild.channels.create({ name, type: ChannelType.GuildCategory });
   return cat;
 }
 
@@ -338,42 +368,90 @@ function isTicketChannel(channel) {
   return channel && channel.type === ChannelType.GuildText && Boolean(getOpenerIdFromTopic(channel.topic));
 }
 
-/* ===================== STICKY (per-channel, in-memory) ===================== */
+// 1 ticket per user total
+function findOpenTicketChannel(guild, openerId) {
+  return guild.channels.cache.find((c) => {
+    if (c.type !== ChannelType.GuildText) return false;
+    return c.topic && c.topic.includes(`opener:${openerId}`);
+  });
+}
+
+/* ===================== STICKY ===================== */
 
 const stickyByChannel = new Map(); // channelId -> { content, messageId }
+
+/* ===================== SLASH COMMAND REGISTRATION ===================== */
+
+async function registerSlashCommands() {
+  if (!process.env.TOKEN) throw new Error("Missing TOKEN");
+  if (!GUILD_ID) throw new Error("Missing GUILD_ID");
+
+  const commands = [
+    new SlashCommandBuilder().setName("vouches").setDescription("Shows how many vouches this server has."),
+
+    new SlashCommandBuilder()
+      .setName("invites")
+      .setDescription("Shows invites still in the server for a user.")
+      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName("addinvites")
+      .setDescription("Add invites to a user (manual). Admin only.")
+      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true))
+      .addIntegerOption((o) => o.setName("amount").setDescription("Amount").setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName("resetinvites")
+      .setDescription("Reset a user's invite stats. Role-locked.")
+      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true)),
+
+    new SlashCommandBuilder().setName("resetall").setDescription("Reset invite stats for EVERYONE. Admin only."),
+
+    new SlashCommandBuilder()
+      .setName("close")
+      .setDescription("Close the current ticket (DMs opener the reason).")
+      .addStringOption((o) => o.setName("reason").setDescription("Reason").setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName("giveaway")
+      .setDescription("Start a giveaway with a join button.")
+      .addStringOption((o) => o.setName("duration").setDescription("e.g. 30m 1h 2d").setRequired(true))
+      .addIntegerOption((o) => o.setName("winners").setDescription("How many winners").setRequired(true))
+      .addStringOption((o) => o.setName("prize").setDescription("Prize").setRequired(true)),
+  ].map((c) => c.toJSON());
+
+  const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
+  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
+  console.log("✅ Slash commands registered");
+}
 
 /* ===================== READY ===================== */
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Register slash commands
   try {
     await registerSlashCommands();
   } catch (e) {
     console.log("❌ Slash register failed:", e.message);
   }
 
-  // Ensure automod role + refresh invite cache for each guild
   for (const guild of client.guilds.cache.values()) {
     try {
       await ensureAutoModRole(guild);
     } catch {}
     try {
       await refreshGuildInvites(guild);
-    } catch (e) {
-      console.log(`⚠️ Invite fetch failed for ${guild.name} (need Manage Server): ${e.message}`);
-    }
+    } catch {}
   }
 
-  // Reschedule giveaways after restart
   for (const gwId of Object.keys(giveawayData.giveaways || {})) {
     const gw = giveawayData.giveaways[gwId];
     if (gw && !gw.ended) scheduleGiveawayEnd(gwId);
   }
 });
 
-/* ===================== INVITE EVENTS + JOIN/LEAVE LOGIC ===================== */
+/* ===================== INVITE EVENTS + JOIN/LEAVE ===================== */
 
 client.on("inviteCreate", async (invite) => {
   try {
@@ -410,7 +488,6 @@ client.on("guildMemberAdd", async (member) => {
       }
     }
 
-    // refresh cache
     const after = new Map();
     invites.forEach((inv) => after.set(inv.code, inv.uses ?? 0));
     invitesCache.set(guild.id, after);
@@ -431,9 +508,7 @@ client.on("guildMemberAdd", async (member) => {
 
     const still = invitesStillInServer(inviterId);
     await logChannel.send(`${member} has been invited by ${used.inviter} and now has **${still}** invites.`);
-  } catch (e) {
-    console.log("Join log error:", e.message);
-  }
+  } catch {}
 });
 
 client.on("guildMemberRemove", async (member) => {
@@ -446,11 +521,11 @@ client.on("guildMemberRemove", async (member) => {
   } catch {}
 });
 
-/* ===================== INTERACTIONS (SLASH + TICKETS + GIVEAWAYS) ===================== */
+/* ===================== INTERACTIONS ===================== */
 
 client.on("interactionCreate", async (interaction) => {
   try {
-    /* ---------- GIVEAWAY JOIN BUTTON ---------- */
+    /* ---------- Giveaway Join Button ---------- */
     if (interaction.isButton() && interaction.customId.startsWith("gw_join:")) {
       const gwId = interaction.customId.split("gw_join:")[1];
       const gw = giveawayData.giveaways[gwId];
@@ -465,7 +540,6 @@ client.on("interactionCreate", async (interaction) => {
 
       saveGiveaways();
 
-      // update embed counts
       try {
         const channel = await client.channels.fetch(gw.channelId);
         const msg = await channel.messages.fetch(gw.messageId);
@@ -485,8 +559,14 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    /* ---------- TICKET BUTTON -> MODAL ---------- */
+    /* ---------- Ticket Buttons -> Modal ---------- */
     if (interaction.isButton() && interaction.customId in TICKET_TYPES) {
+      // 1 ticket per user: block opening modal if already has ticket
+      const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
+      if (existing) {
+        return interaction.reply({ content: `❌ You already have an open ticket: ${existing}`, ephemeral: true });
+      }
+
       const modal = new ModalBuilder()
         .setCustomId(`ticket_modal:${interaction.customId}`)
         .setTitle("Ticket Information");
@@ -513,9 +593,15 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.showModal(modal);
     }
 
-    /* ---------- TICKET MODAL SUBMIT -> CREATE CHANNEL ---------- */
+    /* ---------- Ticket Modal Submit -> Create Ticket ---------- */
     if (interaction.isModalSubmit() && interaction.customId.startsWith("ticket_modal:")) {
       await interaction.deferReply({ ephemeral: true });
+
+      // 1 ticket per user: final check (race condition safe)
+      const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
+      if (existing) {
+        return interaction.editReply(`❌ You already have an open ticket: ${existing}`);
+      }
 
       const buttonId = interaction.customId.split("ticket_modal:")[1];
       const type = TICKET_TYPES[buttonId];
@@ -568,12 +654,10 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply(`✅ Ticket created: ${channel}`);
     }
 
-    /* ---------- SLASH COMMANDS ---------- */
+    /* ---------- Slash Commands ---------- */
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
 
-      // Always respond quickly to prevent timeouts
-      // (we defer for commands that may take time)
       if (name === "vouches") {
         await interaction.deferReply();
 
@@ -605,7 +689,6 @@ client.on("interactionCreate", async (interaction) => {
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
           return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
         }
-
         const user = interaction.options.getUser("user", true);
         const amount = interaction.options.getInteger("amount", true);
 
@@ -617,8 +700,12 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (name === "resetinvites") {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
+        // ONLY those roles. Admin does NOT automatically bypass.
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        const allowed = memberHasAnyRole(member, RESETINVITES_ROLE_IDS);
+
+        if (!allowed) {
+          return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
         }
 
         const user = interaction.options.getUser("user", true);
@@ -629,7 +716,9 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (name === "resetall") {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        // Admin ONLY
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
           return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
         }
 
@@ -651,11 +740,9 @@ client.on("interactionCreate", async (interaction) => {
 
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const isOpener = interaction.user.id === openerId;
-        const isStaff =
-          member.permissions.has(PermissionsBitField.Flags.Administrator) ||
-          STAFF_ROLE_IDS.some((rid) => member.roles.cache.has(rid));
+        const canClose = isOpener || isStaff(member);
 
-        if (!isOpener && !isStaff) {
+        if (!canClose) {
           return interaction.reply({ content: "Only the opener or staff can close this.", ephemeral: true });
         }
 
@@ -672,13 +759,9 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (name === "giveaway") {
-        // Staff: admin OR any staff role
+        // staff roles OR admin
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        const isStaff =
-          member.permissions.has(PermissionsBitField.Flags.Administrator) ||
-          STAFF_ROLE_IDS.some((rid) => member.roles.cache.has(rid));
-
-        if (!isStaff) return interaction.reply({ content: "No permission.", ephemeral: true });
+        if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
 
         const durationStr = interaction.options.getString("duration", true);
         const winners = interaction.options.getInteger("winners", true);
@@ -720,12 +803,10 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
 
-      // Never hang on unknown slash commands
       return interaction.reply({ content: "That slash command isn’t enabled right now.", ephemeral: true });
     }
   } catch (e) {
     console.error(e);
-    // Never leave an interaction hanging
     try {
       if (interaction?.isRepliable?.() && !interaction.replied && !interaction.deferred) {
         await interaction.reply({ content: "Error handling that interaction.", ephemeral: true });
@@ -734,13 +815,13 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-/* ===================== MESSAGE COMMANDS + AUTOMOD + STICKY ===================== */
+/* ===================== MESSAGE HANDLER (AUTOMOD + ADMIN ! COMMANDS + STICKY) ===================== */
 
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild || message.author.bot) return;
 
-    // Link blocker (bypass = admin OR role "automod")
+    // automod link blocker
     if (containsLink(message.content)) {
       const member = message.member;
       if (member) {
@@ -777,16 +858,7 @@ client.on("messageCreate", async (message) => {
       if (cmd === "ticketpanel") {
         const embed = new EmbedBuilder()
           .setTitle("Tickets")
-          .setDescription(
-            "🆘 | Help & Support Ticket\n" +
-              "If you need help with anything, create a support ticket.\n\n" +
-              "💰 | Claim Order\n" +
-              "If you have placed an order and are waiting to receive it please open this ticket.\n\n" +
-              "💸| Sell To us\n" +
-              "Want to make some real cash of the donutsmp? Open a ticket and sell to us here.\n\n" +
-              "🎁 | Claim Rewards Ticket\n" +
-              "Looking to claim rewards, make this ticket."
-          )
+          .setDescription(TICKET_PANEL_TEXT)
           .setColor(0x2b2d31);
 
         const row = new ActionRowBuilder().addComponents(
@@ -849,7 +921,7 @@ client.on("messageCreate", async (message) => {
         const amount = parseInt(arg1, 10);
         if (!amount || amount < 1) return message.reply("Usage: `!purge <amount>` (1-100)");
 
-        const toDelete = Math.min(100, amount + 1); // amount + the command itself
+        const toDelete = Math.min(100, amount + 1);
         await message.channel.bulkDelete(toDelete, true).catch(async () => {
           await message.reply("❌ I can’t bulk delete messages older than 14 days.");
         });
@@ -857,7 +929,7 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    // Sticky behavior after every message
+    // Sticky behavior (after every message)
     const sticky = stickyByChannel.get(message.channel.id);
     if (sticky) {
       if (sticky.messageId && message.id === sticky.messageId) return;
