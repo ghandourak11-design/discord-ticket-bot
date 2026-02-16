@@ -123,7 +123,6 @@ function ensureInviter(inviterId) {
   if (!data.inviterStats[inviterId]) {
     data.inviterStats[inviterId] = { joins: 0, rejoins: 0, left: 0 };
   } else {
-    // Backward-compat if older data missing fields
     data.inviterStats[inviterId].joins ??= 0;
     data.inviterStats[inviterId].rejoins ??= 0;
     data.inviterStats[inviterId].left ??= 0;
@@ -144,14 +143,11 @@ async function registerSlashCommands() {
       .setName("close")
       .setDescription("Close this ticket and DM the opener the reason.")
       .addStringOption((opt) =>
-        opt
-          .setName("reason")
-          .setDescription("Reason for closing (DM'd to the ticket opener)")
-          .setRequired(true)
+        opt.setName("reason").setDescription("Reason (DM'd to ticket opener)").setRequired(true)
       ),
     new SlashCommandBuilder()
       .setName("invites")
-      .setDescription("Show a user's invite stats (total, left, still in server, rejoins).")
+      .setDescription("Show invites still in server for a user.")
       .addUserOption((opt) =>
         opt.setName("user").setDescription("User to check").setRequired(true)
       ),
@@ -165,14 +161,13 @@ async function registerSlashCommands() {
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Register slash commands
   try {
     await registerSlashCommands();
   } catch (e) {
     console.error("❌ Slash command registration failed:", e.message);
   }
 
-  // Prime invite cache for your server
+  // Prime invite cache
   try {
     const guildId = process.env.GUILD_ID;
     const guild = client.guilds.cache.get(guildId);
@@ -244,13 +239,11 @@ client.on("interactionCreate", async (interaction) => {
       const member = interaction.member;
       const info = ticketMap[interaction.customId];
 
-      // Different category per button (auto-create)
       const category = await getOrCreateCategory(guild, info.category);
 
       const usernameSlug = cleanName(member.user.username) || member.user.id;
       const channelName = `${info.key}-${usernameSlug}`.slice(0, 90);
 
-      // Prevent duplicates of same type per user in that category
       const existing = guild.channels.cache.find(
         (c) =>
           c.type === ChannelType.GuildText &&
@@ -314,44 +307,30 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: "Only the ticket opener or staff can close this ticket.", ephemeral: true });
       }
 
-      // DM opener
       try {
         const openerUser = await client.users.fetch(openerId);
         await openerUser.send(
           `Your ticket **${channel.name}** was closed by **${interaction.user.tag}**.\nReason: ${reason}`
         );
-      } catch {
-        // DMs closed - ignore
-      }
+      } catch {}
 
       await interaction.reply({ content: "Closing ticket in 3 seconds...", ephemeral: true });
       setTimeout(() => channel.delete().catch(() => {}), 3000);
       return;
     }
 
-    // SLASH: /invites user:<user>  (EPHEMERAL EMBED ONLY)
+    // SLASH: /invites user:<user>  (REGULAR MESSAGE, ONLY INVITES STILL IN SERVER)
     if (interaction.isChatInputCommand() && interaction.commandName === "invites") {
       const user = interaction.options.getUser("user", true);
 
       const stats = data.inviterStats[user.id] || { joins: 0, rejoins: 0, left: 0 };
-      const joins = stats.joins || 0;
-      const rejoins = stats.rejoins || 0;
+      const total = (stats.joins || 0) + (stats.rejoins || 0);
       const left = stats.left || 0;
-
-      const total = joins + rejoins;
       const still = Math.max(0, total - left);
 
-      const embed = new EmbedBuilder()
-        .setTitle(`Invite Stats — ${user.tag}`)
-        .setColor(0x2b2d31)
-        .addFields(
-          { name: "Total Invites", value: `${total}`, inline: true },
-          { name: "Left", value: `${left}`, inline: true },
-          { name: "Still in Server", value: `${still}`, inline: true },
-          { name: "Rejoins", value: `${rejoins}`, inline: true }
-        );
-
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      return interaction.reply({
+        content: `📨 **${user.tag}** has **${still}** invites still in the server.`,
+      });
     }
   } catch (e) {
     console.error(e);
@@ -362,11 +341,8 @@ client.on("interactionCreate", async (interaction) => {
 client.on("guildMemberAdd", async (member) => {
   try {
     const guild = member.guild;
-
-    // Must have cached invites from before
     const before = invitesCache.get(guild.id) || new Map();
 
-    // Fetch current invites
     const invites = await guild.invites.fetch();
     let usedInvite = null;
 
@@ -389,17 +365,14 @@ client.on("guildMemberAdd", async (member) => {
     const inviterId = usedInvite.inviter.id;
     const s = ensureInviter(inviterId);
 
-    // Rejoin logic:
-    // If we've ever recorded an inviter for this member before, count as rejoin.
+    // Rejoin if we've ever seen this member before
     if (data.memberInviter[member.id]) {
       s.rejoins += 1;
     } else {
       s.joins += 1;
     }
 
-    // Store/overwrite member -> inviter mapping
     data.memberInviter[member.id] = inviterId;
-
     saveData(data);
   } catch (e) {
     console.error("Invite tracking (join) failed:", e.message);
@@ -414,7 +387,7 @@ client.on("guildMemberRemove", async (member) => {
     const s = ensureInviter(inviterId);
     s.left += 1;
 
-    // IMPORTANT: we keep memberInviter mapping so re-joins count as rejoins
+    // Keep mapping so re-joins count as rejoins
     saveData(data);
   } catch (e) {
     console.error("Invite tracking (leave) failed:", e.message);
