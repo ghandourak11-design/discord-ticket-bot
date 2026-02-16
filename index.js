@@ -1,4 +1,6 @@
 require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
 const {
   Client,
   GatewayIntentBits,
@@ -14,11 +16,33 @@ const {
   SlashCommandBuilder,
 } = require("discord.js");
 
+/**
+ * NOTE about storage:
+ * This writes to invites_data.json locally.
+ * On Railway, files can reset on redeploy. If you want permanent tracking,
+ * you’ll want a DB (SQLite + volume, Redis, Mongo, etc).
+ */
+const DATA_FILE = path.join(__dirname, "invites_data.json");
+
+function loadData() {
+  try {
+    return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+  } catch {
+    return { inviterStats: {}, memberInviter: {} };
+  }
+}
+function saveData(data) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
+const data = loadData();
+
+// ---- BOT ----
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers, // REQUIRED for join/leave tracking
   ],
   partials: [Partials.Channel],
 });
@@ -54,14 +78,9 @@ async function getOrCreateCategory(guild, categoryName) {
   let category = guild.channels.cache.find(
     (c) => c.type === ChannelType.GuildCategory && c.name === categoryName
   );
-
   if (!category) {
-    category = await guild.channels.create({
-      name: categoryName,
-      type: ChannelType.GuildCategory,
-    });
+    category = await guild.channels.create({ name: categoryName, type: ChannelType.GuildCategory });
   }
-
   return category;
 }
 
@@ -70,57 +89,88 @@ function getOpenerIdFromTopic(topic) {
   const m = topic.match(/opener:(\d{10,25})/i);
   return m ? m[1] : null;
 }
-
 function isTicketChannel(channel) {
   if (!channel || channel.type !== ChannelType.GuildText) return false;
   return Boolean(getOpenerIdFromTopic(channel.topic));
 }
 
+// ---- INVITES TRACKING ----
+const invitesCache = new Map(); // guildId -> Map(inviteCode -> uses)
+
+async function refreshInvitesForGuild(guild) {
+  // Bot must have Manage Server to fetch invites
+  const invites = await guild.invites.fetch();
+  const map = new Map();
+  invites.forEach((inv) => map.set(inv.code, inv.uses ?? 0));
+  invitesCache.set(guild.id, map);
+  return invites;
+}
+
+function ensureInviter(inviterId) {
+  if (!data.inviterStats[inviterId]) {
+    data.inviterStats[inviterId] = { joins: 0, left: 0 };
+  }
+  return data.inviterStats[inviterId];
+}
+
+// ---- SLASH COMMANDS ----
 async function registerSlashCommands() {
   const token = process.env.TOKEN;
   const guildId = process.env.GUILD_ID;
 
   if (!token) throw new Error("Missing TOKEN env var.");
-  if (!guildId) throw new Error("Missing GUILD_ID env var (needed to register /close).");
+  if (!guildId) throw new Error("Missing GUILD_ID env var (needed for slash commands).");
 
   const commands = [
     new SlashCommandBuilder()
       .setName("close")
       .setDescription("Close this ticket and DM the opener the reason.")
       .addStringOption((opt) =>
-        opt
-          .setName("reason")
-          .setDescription("Reason for closing (will be DM'd to the ticket opener)")
-          .setRequired(true)
-      )
-      .toJSON(),
-  ];
+        opt.setName("reason").setDescription("Reason (DM'd to ticket opener)").setRequired(true)
+      ),
+    new SlashCommandBuilder()
+      .setName("invites")
+      .setDescription("Show a user's invite stats (total, left, active).")
+      .addUserOption((opt) =>
+        opt.setName("user").setDescription("User to check").setRequired(true)
+      ),
+  ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(token);
   await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
-  console.log("✅ Registered slash commands (/close) for this server.");
+  console.log("✅ Registered slash commands (/close, /invites) for this server.");
 }
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+
+  // Register slash commands
   try {
     await registerSlashCommands();
   } catch (e) {
     console.error("❌ Slash command registration failed:", e.message);
   }
+
+  // Prime invites cache for your server
+  try {
+    const guildId = process.env.GUILD_ID;
+    const guild = client.guilds.cache.get(guildId);
+    if (guild) await refreshInvitesForGuild(guild);
+  } catch (e) {
+    console.error("❌ Could not fetch invites. Make sure the bot has Manage Server:", e.message);
+  }
 });
 
+// ---- TEXT COMMANDS ----
 client.on("messageCreate", async (message) => {
   if (message.author.bot || !message.guild) return;
   if (!message.content.startsWith(PREFIX)) return;
 
-  // Preserve formatting/newlines for !embed
   const cmd = message.content.slice(PREFIX.length).split(" ")[0].toLowerCase();
-  const text = message.content.slice(PREFIX.length + cmd.length + 1);
+  const text = message.content.slice(PREFIX.length + cmd.length + 1); // preserve formatting
 
   if (cmd === "embed") {
     if (!text || !text.trim()) return message.reply("Usage: `!embed <text>`");
-
     const embed = new EmbedBuilder().setDescription(text).setColor(0x2b2d31);
     return message.channel.send({ embeds: [embed] });
   }
@@ -149,8 +199,9 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+// ---- INTERACTIONS ----
 client.on("interactionCreate", async (interaction) => {
-  // ✅ Button ticket creation
+  // Buttons: create tickets
   if (interaction.isButton() && interaction.guild) {
     if (!(interaction.customId in ticketMap)) return;
 
@@ -160,13 +211,11 @@ client.on("interactionCreate", async (interaction) => {
     const member = interaction.member;
     const info = ticketMap[interaction.customId];
 
-    // Use your exact category names (auto-create if missing)
     const category = await getOrCreateCategory(guild, info.category);
 
     const usernameSlug = cleanName(member.user.username) || member.user.id;
     const channelName = `${info.key}-${usernameSlug}`.slice(0, 90);
 
-    // Prevent duplicate of same ticket type per user in that category
     const existing = guild.channels.cache.find(
       (c) =>
         c.type === ChannelType.GuildText &&
@@ -204,7 +253,7 @@ client.on("interactionCreate", async (interaction) => {
     return interaction.editReply({ content: `✅ Ticket created: ${channel}` });
   }
 
-  // ✅ Slash command: /close reason:<text>
+  // Slash: /close reason:<text>
   if (interaction.isChatInputCommand() && interaction.commandName === "close") {
     if (!interaction.guild) return;
 
@@ -230,18 +279,93 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: "Only the ticket opener or staff can close this ticket.", ephemeral: true });
     }
 
-    // DM the opener the reason
     try {
       const openerUser = await client.users.fetch(openerId);
       await openerUser.send(
         `Your ticket **${channel.name}** was closed by **${interaction.user.tag}**.\nReason: ${reason}`
       );
-    } catch {
-      // If DMs are closed, ignore
-    }
+    } catch {}
 
     await interaction.reply({ content: "Closing ticket in 3 seconds...", ephemeral: true });
     setTimeout(() => channel.delete().catch(() => {}), 3000);
+    return;
+  }
+
+  // Slash: /invites user:<user>
+  if (interaction.isChatInputCommand() && interaction.commandName === "invites") {
+    const user = interaction.options.getUser("user", true);
+
+    const stats = data.inviterStats[user.id] || { joins: 0, left: 0 };
+    const active = Math.max(0, stats.joins - stats.left);
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Invites for ${user.tag}`)
+      .setDescription(
+        `**Total joins:** ${stats.joins}\n` +
+        `**Left:** ${stats.left}\n` +
+        `**Still in server:** ${active}`
+      )
+      .setColor(0x2b2d31);
+
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+});
+
+// ---- MEMBER JOIN/LEAVE (INVITES) ----
+client.on("guildMemberAdd", async (member) => {
+  try {
+    const guild = member.guild;
+    const before = invitesCache.get(guild.id) || new Map();
+
+    const invites = await guild.invites.fetch();
+    let usedInvite = null;
+
+    for (const inv of invites.values()) {
+      const prevUses = before.get(inv.code) ?? 0;
+      const nowUses = inv.uses ?? 0;
+      if (nowUses > prevUses) {
+        usedInvite = inv;
+        break;
+      }
+    }
+
+    // Refresh cache
+    const afterMap = new Map();
+    invites.forEach((inv) => afterMap.set(inv.code, inv.uses ?? 0));
+    invitesCache.set(guild.id, afterMap);
+
+    if (!usedInvite || !usedInvite.inviter) return;
+
+    const inviterId = usedInvite.inviter.id;
+
+    // Track member -> inviter
+    data.memberInviter[member.id] = inviterId;
+
+    // Increment inviter stats
+    const s = ensureInviter(inviterId);
+    s.joins += 1;
+
+    saveData(data);
+  } catch (e) {
+    // Usually missing Manage Server permission
+    console.error("Invite tracking (join) failed:", e.message);
+  }
+});
+
+client.on("guildMemberRemove", async (member) => {
+  try {
+    const inviterId = data.memberInviter[member.id];
+    if (!inviterId) return;
+
+    const s = ensureInviter(inviterId);
+    s.left += 1;
+
+    // Optional: keep mapping so re-joins still associated; or delete it:
+    // delete data.memberInviter[member.id];
+
+    saveData(data);
+  } catch (e) {
+    console.error("Invite tracking (leave) failed:", e.message);
   }
 });
 
