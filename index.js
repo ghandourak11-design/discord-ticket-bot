@@ -32,8 +32,8 @@ client.on("messageCreate", async (message) => {
   if (message.author.bot || !message.guild) return;
   if (!message.content.startsWith(PREFIX)) return;
 
-  const [cmd, ...args] = message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const text = args.join(" ");
+const cmd = message.content.slice(PREFIX.length).split(" ")[0];
+const text = message.content.slice(PREFIX.length + cmd.length + 1);
 
   if (cmd === "embed") {
     if (!text) return message.reply("Usage: `!embed <text>`");
@@ -139,3 +139,4 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.login(process.env.TOKEN);
+
