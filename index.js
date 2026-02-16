@@ -16,11 +16,6 @@ const {
   SlashCommandBuilder,
 } = require("discord.js");
 
-/**
- * Invite data storage (simple JSON).
- * NOTE: Railway can reset local files on redeploy. If you need permanent tracking,
- * tell me and I’ll switch this to a DB.
- */
 const DATA_FILE = path.join(__dirname, "invites_data.json");
 
 function loadData() {
@@ -28,8 +23,8 @@ function loadData() {
     return JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
   } catch {
     return {
-      inviterStats: {},    // inviterId -> { joins, rejoins, left }
-      memberInviter: {},   // memberId -> inviterId (kept even after leave to detect rejoins)
+      inviterStats: {},    // inviterId -> { joins, rejoins, left, manual }
+      memberInviter: {},   // memberId -> inviterId
     };
   }
 }
@@ -44,20 +39,18 @@ function saveData(d) {
 
 const data = loadData();
 
-// ---- BOT ----
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers, // REQUIRED for join/leave tracking
+    GatewayIntentBits.GuildMembers,
   ],
   partials: [Partials.Channel],
 });
 
 const PREFIX = "!";
 
-// EXACT category names (auto-created if missing)
 const CATEGORIES = {
   SELL: "Sell to Us",
   SUPPORT: "Help & Support",
@@ -65,7 +58,6 @@ const CATEGORIES = {
   REWARDS: "Rewards",
 };
 
-// Buttons -> ticket type config (each points to a different category)
 const ticketMap = {
   ticket_open_sell: { key: "sell-to-us", label: "Sell to Us", category: CATEGORIES.SELL },
   ticket_open_claim: { key: "claim-order", label: "Claim Order", category: CATEGORIES.CLAIM },
@@ -86,14 +78,9 @@ async function getOrCreateCategory(guild, categoryName) {
   let category = guild.channels.cache.find(
     (c) => c.type === ChannelType.GuildCategory && c.name === categoryName
   );
-
   if (!category) {
-    category = await guild.channels.create({
-      name: categoryName,
-      type: ChannelType.GuildCategory,
-    });
+    category = await guild.channels.create({ name: categoryName, type: ChannelType.GuildCategory });
   }
-
   return category;
 }
 
@@ -121,13 +108,20 @@ async function refreshInvitesForGuild(guild) {
 
 function ensureInviter(inviterId) {
   if (!data.inviterStats[inviterId]) {
-    data.inviterStats[inviterId] = { joins: 0, rejoins: 0, left: 0 };
+    data.inviterStats[inviterId] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
   } else {
     data.inviterStats[inviterId].joins ??= 0;
     data.inviterStats[inviterId].rejoins ??= 0;
     data.inviterStats[inviterId].left ??= 0;
+    data.inviterStats[inviterId].manual ??= 0;
   }
   return data.inviterStats[inviterId];
+}
+
+function stillInServerCount(userId) {
+  const stats = ensureInviter(userId);
+  const base = (stats.joins || 0) + (stats.rejoins || 0) - (stats.left || 0);
+  return Math.max(0, base + (stats.manual || 0));
 }
 
 // ---- SLASH COMMANDS ----
@@ -145,17 +139,29 @@ async function registerSlashCommands() {
       .addStringOption((opt) =>
         opt.setName("reason").setDescription("Reason (DM'd to ticket opener)").setRequired(true)
       ),
+
     new SlashCommandBuilder()
       .setName("invites")
       .setDescription("Show invites still in server for a user.")
-      .addUserOption((opt) =>
-        opt.setName("user").setDescription("User to check").setRequired(true)
+      .addUserOption((opt) => opt.setName("user").setDescription("User to check").setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName("addinvites")
+      .setDescription("Add invites to a user's still-in-server count.")
+      .addUserOption((opt) => opt.setName("user").setDescription("User").setRequired(true))
+      .addIntegerOption((opt) =>
+        opt.setName("amount").setDescription("How many invites to add").setRequired(true)
       ),
+
+    new SlashCommandBuilder()
+      .setName("resetinvites")
+      .setDescription("Reset a user's invite stats to 0.")
+      .addUserOption((opt) => opt.setName("user").setDescription("User").setRequired(true)),
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(token);
   await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
-  console.log("✅ Registered slash commands (/close, /invites) for this server.");
+  console.log("✅ Registered slash commands (/close, /invites, /addinvites, /resetinvites).");
 }
 
 client.once("ready", async () => {
@@ -167,7 +173,6 @@ client.once("ready", async () => {
     console.error("❌ Slash command registration failed:", e.message);
   }
 
-  // Prime invite cache
   try {
     const guildId = process.env.GUILD_ID;
     const guild = client.guilds.cache.get(guildId);
@@ -186,19 +191,15 @@ client.on("messageCreate", async (message) => {
     if (message.author.bot || !message.guild) return;
     if (!message.content.startsWith(PREFIX)) return;
 
-    // Preserve formatting/newlines by NOT splitting on whitespace
     const cmd = message.content.slice(PREFIX.length).split(" ")[0].toLowerCase();
     const text = message.content.slice(PREFIX.length + cmd.length + 1);
 
-    // !embed <text>
     if (cmd === "embed") {
       if (!text || !text.trim()) return message.reply("Usage: `!embed <text>`");
-
       const embed = new EmbedBuilder().setDescription(text).setColor(0x2b2d31);
       return message.channel.send({ embeds: [embed] });
     }
 
-    // !ticketpanel
     if (cmd === "ticketpanel") {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("You need **Administrator** to post the ticket panel.");
@@ -229,7 +230,7 @@ client.on("messageCreate", async (message) => {
 // ---- INTERACTIONS ----
 client.on("interactionCreate", async (interaction) => {
   try {
-    // BUTTONS: create tickets
+    // BUTTON ticket creation
     if (interaction.isButton() && interaction.guild) {
       if (!(interaction.customId in ticketMap)) return;
 
@@ -281,7 +282,7 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply({ content: `✅ Ticket created: ${channel}` });
     }
 
-    // SLASH: /close reason:<text>
+    // SLASH: /close
     if (interaction.isChatInputCommand() && interaction.commandName === "close") {
       if (!interaction.guild) return;
 
@@ -319,17 +320,60 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // SLASH: /invites user:<user>  (REGULAR MESSAGE, ONLY INVITES STILL IN SERVER)
+    // SLASH: /invites (regular message)
     if (interaction.isChatInputCommand() && interaction.commandName === "invites") {
       const user = interaction.options.getUser("user", true);
-
-      const stats = data.inviterStats[user.id] || { joins: 0, rejoins: 0, left: 0 };
-      const total = (stats.joins || 0) + (stats.rejoins || 0);
-      const left = stats.left || 0;
-      const still = Math.max(0, total - left);
+      const still = stillInServerCount(user.id);
 
       return interaction.reply({
         content: `📨 **${user.tag}** has **${still}** invites still in the server.`,
+      });
+    }
+
+    // SLASH: /addinvites (staff-only)
+    if (interaction.isChatInputCommand() && interaction.commandName === "addinvites") {
+      const member = await interaction.guild.members.fetch(interaction.user.id);
+      const isStaff =
+        member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+        member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+
+      if (!isStaff) {
+        return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
+      }
+
+      const user = interaction.options.getUser("user", true);
+      const amount = interaction.options.getInteger("amount", true);
+
+      const stats = ensureInviter(user.id);
+      stats.manual += amount;
+      saveData(data);
+
+      const still = stillInServerCount(user.id);
+
+      return interaction.reply({
+        content: `✅ Added **${amount}** invites to **${user.tag}**. Now: **${still}** invites still in server.`,
+      });
+    }
+
+    // SLASH: /resetinvites (staff-only)
+    if (interaction.isChatInputCommand() && interaction.commandName === "resetinvites") {
+      const member = await interaction.guild.members.fetch(interaction.user.id);
+      const isStaff =
+        member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+        member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+
+      if (!isStaff) {
+        return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
+      }
+
+      const user = interaction.options.getUser("user", true);
+
+      // Reset stats (keeps memberInviter mapping for rejoin detection if you want; but stats reset is what you asked)
+      data.inviterStats[user.id] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
+      saveData(data);
+
+      return interaction.reply({
+        content: `✅ Reset invite stats for **${user.tag}** to **0**.`,
       });
     }
   } catch (e) {
@@ -366,11 +410,8 @@ client.on("guildMemberAdd", async (member) => {
     const s = ensureInviter(inviterId);
 
     // Rejoin if we've ever seen this member before
-    if (data.memberInviter[member.id]) {
-      s.rejoins += 1;
-    } else {
-      s.joins += 1;
-    }
+    if (data.memberInviter[member.id]) s.rejoins += 1;
+    else s.joins += 1;
 
     data.memberInviter[member.id] = inviterId;
     saveData(data);
