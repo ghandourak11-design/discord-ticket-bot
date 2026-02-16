@@ -14,7 +14,18 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require("discord.js");
+
+/* -------------------- STAFF ROLES THAT CAN SEE TICKETS -------------------- */
+const STAFF_ROLE_IDS = [
+  "1465888170531881123",
+  "1457184344538874029",
+  "1456504229148758229",
+  "1464012365472337990",
+];
 
 /* -------------------- INVITE DATA (simple JSON) -------------------- */
 const DATA_FILE = path.join(__dirname, "invites_data.json");
@@ -43,15 +54,15 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers, // invite tracking + join/leave
+    GatewayIntentBits.MessageContent, // for !embed and !ticketpanel
+    GatewayIntentBits.GuildMembers, // invite join/leave tracking
   ],
   partials: [Partials.Channel],
 });
 
 const PREFIX = "!";
 
-/* -------------------- TICKET SETUP -------------------- */
+/* -------------------- TICKETS -------------------- */
 const CATEGORIES = {
   SELL: "Sell to Us",
   SUPPORT: "Help & Support",
@@ -90,19 +101,12 @@ function getOpenerIdFromTopic(topic) {
   const m = topic.match(/opener:(\d{10,25})/i);
   return m ? m[1] : null;
 }
-
 function isTicketChannel(channel) {
   if (!channel || channel.type !== ChannelType.GuildText) return false;
   return Boolean(getOpenerIdFromTopic(channel.topic));
 }
 
-/**
- * We’ll track which channels are waiting for "What do you need?" answers
- * so we don’t create multiple collectors.
- */
-const pendingNeedAnswer = new Set();
-
-/* -------------------- INVITE TRACKING -------------------- */
+/* -------------------- INVITES TRACKING -------------------- */
 const invitesCache = new Map(); // guildId -> Map(inviteCode -> uses)
 
 async function refreshInvitesForGuild(guild) {
@@ -178,7 +182,6 @@ client.once("ready", async () => {
     console.error("❌ Slash command registration failed:", e.message);
   }
 
-  // Prime invites cache
   try {
     const guild = client.guilds.cache.get(process.env.GUILD_ID);
     if (guild) await refreshInvitesForGuild(guild);
@@ -194,16 +197,14 @@ client.on("messageCreate", async (message) => {
     if (!message.content.startsWith(PREFIX)) return;
 
     const cmd = message.content.slice(PREFIX.length).split(" ")[0].toLowerCase();
-    const text = message.content.slice(PREFIX.length + cmd.length + 1); // preserve formatting
+    const text = message.content.slice(PREFIX.length + cmd.length + 1); // preserve newlines
 
-    // !embed <text>
     if (cmd === "embed") {
       if (!text || !text.trim()) return message.reply("Usage: `!embed <text>`");
       const embed = new EmbedBuilder().setDescription(text).setColor(0x2b2d31);
       return message.channel.send({ embeds: [embed] });
     }
 
-    // !ticketpanel
     if (cmd === "ticketpanel") {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
         return message.reply("You need **Administrator** to post the ticket panel.");
@@ -244,22 +245,50 @@ client.on("messageCreate", async (message) => {
 /* -------------------- INTERACTIONS -------------------- */
 client.on("interactionCreate", async (interaction) => {
   try {
-    /* -------- Buttons -> Create Ticket + Ask "What do you need?" -------- */
+    /* -------- BUTTON -> SHOW MODAL -------- */
     if (interaction.isButton() && interaction.guild) {
       if (!(interaction.customId in ticketMap)) return;
+
+      const info = ticketMap[interaction.customId];
+
+      const modal = new ModalBuilder()
+        .setCustomId(`ticket_modal:${interaction.customId}`)
+        .setTitle(info.label);
+
+      const needInput = new TextInputBuilder()
+        .setCustomId("need")
+        .setLabel("What do you need?")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(1000);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(needInput));
+      return interaction.showModal(modal);
+    }
+
+    /* -------- MODAL SUBMIT -> CREATE TICKET + POST ANSWER -------- */
+    if (interaction.isModalSubmit() && interaction.guild) {
+      if (!interaction.customId.startsWith("ticket_modal:")) return;
+
+      const buttonId = interaction.customId.split("ticket_modal:")[1];
+      if (!(buttonId in ticketMap)) {
+        return interaction.reply({ content: "Invalid ticket type.", ephemeral: true });
+      }
 
       await interaction.deferReply({ ephemeral: true });
 
       const guild = interaction.guild;
       const member = interaction.member;
-      const info = ticketMap[interaction.customId];
+      const info = ticketMap[buttonId];
+
+      const needText = interaction.fields.getTextInputValue("need")?.trim() || "No details provided.";
 
       const category = await getOrCreateCategory(guild, info.category);
 
       const usernameSlug = cleanName(member.user.username) || member.user.id;
       const channelName = `${info.key}-${usernameSlug}`.slice(0, 90);
 
-      // Prevent duplicates per type per user inside that category
+      // Prevent duplicate of same type per user in that category
       const existing = guild.channels.cache.find(
         (c) =>
           c.type === ChannelType.GuildText &&
@@ -270,59 +299,42 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply({ content: `You already have this ticket open: ${existing}` });
       }
 
+      // Permissions: opener + staff roles can view
+      const overwrites = [
+        { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+        {
+          id: member.user.id,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ],
+        },
+        // Add staff roles
+        ...STAFF_ROLE_IDS.map((roleId) => ({
+          id: roleId,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ],
+        })),
+      ];
+
       const channel = await guild.channels.create({
         name: channelName,
         type: ChannelType.GuildText,
         parent: category.id,
         topic: `${info.label} (${member.user.username}) | opener:${member.user.id}`,
-        permissionOverwrites: [
-          { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-          {
-            id: member.user.id,
-            allow: [
-              PermissionsBitField.Flags.ViewChannel,
-              PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ReadMessageHistory,
-            ],
-          },
-        ],
+        permissionOverwrites: overwrites,
       });
 
-      // Ask question
-      const askEmbed = new EmbedBuilder()
+      const detailsEmbed = new EmbedBuilder()
         .setTitle(`${info.label} (${member.user.username})`)
-        .setDescription("**What do you need?**\nReply in this channel with your answer.")
+        .setDescription(`**What they need:**\n${needText}`)
         .setColor(0x2b2d31);
 
-      await channel.send({ content: `${member}`, embeds: [askEmbed] });
-
-      // Set up collector for ONE answer from opener
-      pendingNeedAnswer.add(channel.id);
-
-      const filter = (m) => m.author.id === member.user.id && m.channel.id === channel.id;
-      const collector = channel.createMessageCollector({ filter, max: 1, time: 5 * 60 * 1000 });
-
-      collector.on("collect", async (m) => {
-        // Post their answer into an embed
-        const answerEmbed = new EmbedBuilder()
-          .setTitle("Ticket Details")
-          .addFields(
-            { name: "User", value: `${member.user.tag}`, inline: true },
-            { name: "Type", value: info.label, inline: true },
-            { name: "What they need", value: m.content.slice(0, 1024) || "(no text)", inline: false }
-          )
-          .setColor(0x2b2d31);
-
-        await channel.send({ embeds: [answerEmbed] });
-        pendingNeedAnswer.delete(channel.id);
-      });
-
-      collector.on("end", async (collected) => {
-        if (collected.size === 0 && pendingNeedAnswer.has(channel.id)) {
-          pendingNeedAnswer.delete(channel.id);
-          await channel.send("⏰ No answer received. If you still need help, type your message here anyway.");
-        }
-      });
+      await channel.send({ content: `${member}`, embeds: [detailsEmbed] });
 
       return interaction.editReply({ content: `✅ Ticket created: ${channel}` });
     }
@@ -345,7 +357,11 @@ client.on("interactionCreate", async (interaction) => {
 
       const member = await interaction.guild.members.fetch(interaction.user.id);
       const isOpener = interaction.user.id === openerId;
+
+      // Staff if admin/manage channels OR has any staff role ID
+      const hasStaffRole = STAFF_ROLE_IDS.some((rid) => member.roles.cache.has(rid));
       const isStaff =
+        hasStaffRole ||
         member.permissions.has(PermissionsBitField.Flags.Administrator) ||
         member.permissions.has(PermissionsBitField.Flags.ManageChannels);
 
@@ -365,48 +381,49 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    /* -------- /invites user:<user>  (regular message, only still-in-server count) -------- */
+    /* -------- /invites user (regular message, only still-in-server count) -------- */
     if (interaction.isChatInputCommand() && interaction.commandName === "invites") {
       const user = interaction.options.getUser("user", true);
       const still = stillInServerCount(user.id);
-      return interaction.reply({
-        content: `📨 **${user.tag}** has **${still}** invites still in the server.`,
-      });
+      return interaction.reply({ content: `📨 **${user.tag}** has **${still}** invites still in the server.` });
     }
 
-    /* -------- /addinvites user amount  (staff-only) -------- */
+    /* -------- /addinvites (staff-only) -------- */
     if (interaction.isChatInputCommand() && interaction.commandName === "addinvites") {
-      const member = await interaction.guild.members.fetch(interaction.user.id);
+      const me = await interaction.guild.members.fetch(interaction.user.id);
+
+      const hasStaffRole = STAFF_ROLE_IDS.some((rid) => me.roles.cache.has(rid));
       const isStaff =
-        member.permissions.has(PermissionsBitField.Flags.Administrator) ||
-        member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+        hasStaffRole ||
+        me.permissions.has(PermissionsBitField.Flags.Administrator) ||
+        me.permissions.has(PermissionsBitField.Flags.ManageGuild);
 
       if (!isStaff) return interaction.reply({ content: "No permission.", ephemeral: true });
 
       const user = interaction.options.getUser("user", true);
       const amount = interaction.options.getInteger("amount", true);
 
-      const stats = ensureInviter(user.id);
-      stats.manual += amount;
+      const s = ensureInviter(user.id);
+      s.manual += amount;
       saveData(data);
 
       const still = stillInServerCount(user.id);
-      return interaction.reply({
-        content: `✅ Added **${amount}** to **${user.tag}**. Now: **${still}** invites still in server.`,
-      });
+      return interaction.reply({ content: `✅ Added **${amount}** to **${user.tag}**. Now: **${still}** invites still in server.` });
     }
 
-    /* -------- /resetinvites user  (staff-only) -------- */
+    /* -------- /resetinvites (staff-only) -------- */
     if (interaction.isChatInputCommand() && interaction.commandName === "resetinvites") {
-      const member = await interaction.guild.members.fetch(interaction.user.id);
+      const me = await interaction.guild.members.fetch(interaction.user.id);
+
+      const hasStaffRole = STAFF_ROLE_IDS.some((rid) => me.roles.cache.has(rid));
       const isStaff =
-        member.permissions.has(PermissionsBitField.Flags.Administrator) ||
-        member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+        hasStaffRole ||
+        me.permissions.has(PermissionsBitField.Flags.Administrator) ||
+        me.permissions.has(PermissionsBitField.Flags.ManageGuild);
 
       if (!isStaff) return interaction.reply({ content: "No permission.", ephemeral: true });
 
       const user = interaction.options.getUser("user", true);
-
       data.inviterStats[user.id] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
       saveData(data);
 
@@ -445,7 +462,6 @@ client.on("guildMemberAdd", async (member) => {
     const inviterId = usedInvite.inviter.id;
     const s = ensureInviter(inviterId);
 
-    // Rejoin if we've ever seen this member before
     if (data.memberInviter[member.id]) s.rejoins += 1;
     else s.joins += 1;
 
@@ -464,7 +480,6 @@ client.on("guildMemberRemove", async (member) => {
     const s = ensureInviter(inviterId);
     s.left += 1;
 
-    // Keep mapping so re-joins count as rejoins
     saveData(data);
   } catch (e) {
     console.error("Invite tracking (leave) failed:", e.message);
