@@ -1,54 +1,58 @@
 /**
- * FULL index.js (Working + Clean)
+ * DonutDemand Bot — Full (keeps everything from this chat) MINUS Carl/MEE6 QoL slash commands
  *
- * ✅ Fixes the "Invalid Array length" slash command bug (keeps /embed under 25 options)
  * ✅ Slash commands:
- *   /embed (ADMIN only) -> title, description, color, url, thumbnail, image, channel
- *   /vouches -> counts messages in vouches channel
- *   /invites <user> -> invites still in server only
- *   /generate -> creates a personal invite and credits the generator in OUR tracking
- *   /linkinvite <code/link> -> link an existing invite code to yourself
- *   /addinvites <user> <amount> -> admin only
- *   /resetinvites <user> -> ONLY allowed role IDs (admins do NOT bypass)
- *   /resetall -> admin only
- *   /close <reason> -> closes ticket, DMs opener reason (opener OR staff OR admin)
- *   /giveaway <duration> <winners> <prize> <min_invites?> -> red embed, join button, min invites requirement
- *   /end <messageId/link> -> staff/admin end early
- *   /reroll <messageId/link> -> staff/admin reroll winners
+ *  /embed (ADMIN) — title/description/color/url/thumbnail/image + optional channel
+ *  /vouches — counts messages in vouches channel
+ *  /invites <user> — invites still in server only
+ *  /generate — personal invite credited to generator (our tracking)
+ *  /linkinvite <code/link> — link existing invite code to yourself for credit
+ *  /addinvites <user> <amount> — admin only
+ *  /resetinvites <user> — ONLY staff role IDs (admins do NOT bypass unless also staff)
+ *  /resetall — admin only
+ *  /close <reason> — ticket only, opener OR staff OR admin; DMs opener reason; deletes channel
+ *  /link <user> — staff/admin: active invited members + invite links used
+ *  /operation start <duration> — admin, ticket only: give Customer role + ping vouch + close after timer
+ *  /operation cancel — admin, ticket only: cancel timer
  *
- * ✅ Message commands (ADMIN only):
- *   !ticketpanel -> posts ticket panel with buttons
- *   !stick <message> -> sticky message
- *   !unstick
- *   !mute <user> -> 5 min timeout, announces it
- *   !ban <user> -> announces it
- *   !kick <user> -> announces it
- *   !purge <amount> -> deletes amount + command
+ * ✅ Giveaways:
+ *  /giveaway <duration> <winners> <prize> <min_invites?>
+ *  /end <messageId/link> (staff/admin)
+ *  /reroll <messageId/link> (staff/admin)
+ *
+ * ✅ Admin prefix commands (Administrator only):
+ *  !ticketpanel
+ *  !stick <message>
+ *  !unstick
+ *  !mute <@user|id>   (5 min timeout + announcement)
+ *  !ban <@user|id>    (announcement)
+ *  !kick <@user|id>   (announcement)
+ *  !purge <amount>    (deletes amount + command)
  *
  * ✅ Tickets:
- *   - 4 types -> 4 categories (auto-create if missing)
- *   - Modal BEFORE ticket opens asks:
+ *  - 4 types -> 4 categories (auto-create)
+ *  - Modal BEFORE opening asks:
  *      - Minecraft username
  *      - What do you need?
- *   - Only 1 open ticket per user at a time
- *   - Staff roles can see tickets
+ *  - Only 1 open ticket per user
+ *  - Staff roles can view tickets
  *
  * ✅ Automod:
- *   - Blocks links unless Admin OR has role named "automod" (auto-created if possible)
+ *  - Blocks links unless Admin OR has role named "automod" (auto-created if possible)
  *
  * ✅ Invites:
- *   - Tracks joins / rejoins / leaves / manual
- *   - Join log channel posts:
- *        <user> has been invited by <inviter> and now has <invites> invites.
- *     (invites = still-in-server only, from OUR tracking)
+ *  - Persistent JSON storage (won’t reset on restart)
+ *  - Tracks joins / rejoins / leaves / manual
+ *  - Join log channel posts:
+ *      <user> has been invited by <inviter> and now has <invites> invites.
  *
- * ENV (Railway Variables):
- *   TOKEN=...
- *   GUILD_ID=...
+ * ENV:
+ *  TOKEN=...
+ *  GUILD_ID=...
  *
- * Dev Portal Intents:
- *   - Server Members Intent
- *   - Message Content Intent
+ * Dev Portal Intents to enable:
+ *  - Server Members Intent
+ *  - Message Content Intent
  */
 
 require("dotenv").config();
@@ -80,10 +84,11 @@ const GUILD_ID = process.env.GUILD_ID;
 
 const AUTOMOD_ROLE_NAME = "automod";
 
+const CUSTOMER_ROLE_ID = "1455179722089562216";
 const VOUCHES_CHANNEL_ID = "1455198053546983454";
 const JOIN_LOG_CHANNEL_ID = "1461947323541225704";
 
-// Staff roles that can SEE tickets and can /close + giveaway controls
+// Staff roles that can SEE tickets + /link + giveaways + /close
 const STAFF_ROLE_IDS = [
   "1465888170531881123",
   "1457184344538874029",
@@ -91,13 +96,8 @@ const STAFF_ROLE_IDS = [
   "1464012365472337990",
 ];
 
-// ONLY these roles can /resetinvites (admins do NOT bypass unless they also have one of these roles)
-const RESETINVITES_ROLE_IDS = [
-  "1465888170531881123",
-  "1457184344538874029",
-  "1456504229148758229",
-  "1464012365472337990",
-];
+// ONLY these roles can /resetinvites (admins do NOT bypass unless also staff)
+const RESETINVITES_ROLE_IDS = [...STAFF_ROLE_IDS];
 
 const TICKET_TYPES = {
   ticket_support: { label: "Help & Support", category: "Help & Support", key: "help-support" },
@@ -107,14 +107,10 @@ const TICKET_TYPES = {
 };
 
 const TICKET_PANEL_TEXT =
-  "🆘 | Help & Support Ticket\n" +
-  "If you need help with anything, create a support ticket.\n\n" +
-  "💰 | Claim Order\n" +
-  "If you have placed an order and are waiting to receive it please open this ticket.\n\n" +
-  "💸| Sell To us\n" +
-  "Want to make some real cash of the donutsmp? Open a ticket and sell to us here.\n\n" +
-  "🎁 | Claim Rewards Ticket\n" +
-  "Looking to claim rewards, make this ticket.";
+  "🆘 | Help & Support Ticket\nIf you need help with anything, create a support ticket.\n\n" +
+  "💰 | Claim Order\nIf you have placed an order and are waiting to receive it please open this ticket.\n\n" +
+  "💸 | Sell To Us\nWant to make some real cash of the donutsmp? Open a ticket and sell to us here.\n\n" +
+  "🎁 | Claim Rewards Ticket\nLooking to claim rewards, make this ticket.";
 
 /* ===================== STORAGE ===================== */
 
@@ -140,12 +136,26 @@ function saveJson(file, data) {
 const invitesData = loadJson(INVITES_FILE, {
   inviterStats: {}, // inviterId -> { joins, rejoins, left, manual }
   memberInviter: {}, // memberId -> creditedInviterId
-  inviteOwners: {}, // inviteCode -> userId (custom credit owner for /generate and /linkinvite)
+  inviteOwners: {}, // inviteCode -> userId (custom credit owner)
+  invitedMembers: {}, // inviterId -> { memberId: { inviteCode, joinedAt, active, leftAt } }
 });
 
-const giveawayData = loadJson(GIVEAWAYS_FILE, {
-  giveaways: {}, // messageId -> giveaway object
-});
+invitesData.inviterStats ??= {};
+invitesData.memberInviter ??= {};
+invitesData.inviteOwners ??= {};
+invitesData.invitedMembers ??= {};
+saveJson(INVITES_FILE, invitesData);
+
+const giveawayData = loadJson(GIVEAWAYS_FILE, { giveaways: {} });
+giveawayData.giveaways ??= {};
+saveJson(GIVEAWAYS_FILE, giveawayData);
+
+function saveInvites() {
+  saveJson(INVITES_FILE, invitesData);
+}
+function saveGiveaways() {
+  saveJson(GIVEAWAYS_FILE, giveawayData);
+}
 
 /* ===================== CLIENT ===================== */
 
@@ -173,9 +183,9 @@ function cleanName(str) {
 
 function parseUserId(arg) {
   if (!arg) return null;
-  const mention = arg.match(/^<@!?(\d{10,25})>$/);
+  const mention = String(arg).match(/^<@!?(\d{10,25})>$/);
   if (mention) return mention[1];
-  const id = arg.match(/^(\d{10,25})$/);
+  const id = String(arg).match(/^(\d{10,25})$/);
   if (id) return id[1];
   return null;
 }
@@ -189,7 +199,7 @@ function containsLink(content) {
 
 function extractInviteCode(input) {
   if (!input) return null;
-  return input
+  return String(input)
     .trim()
     .replace(/^https?:\/\/(www\.)?(discord\.gg|discord\.com\/invite)\//i, "")
     .replace(/[\s/]+/g, "")
@@ -199,7 +209,7 @@ function extractInviteCode(input) {
 function extractMessageId(input) {
   if (!input) return null;
   const s = String(input).trim();
-  const m1 = s.match(/\/(\d{10,25})$/); // message link ends with /<messageId>
+  const m1 = s.match(/\/(\d{10,25})$/);
   if (m1) return m1[1];
   const m2 = s.match(/^(\d{10,25})$/);
   if (m2) return m2[1];
@@ -213,6 +223,16 @@ function parseHexColor(input) {
   if (s.startsWith("0x")) s = s.slice(2);
   if (!/^[0-9a-fA-F]{6}$/.test(s)) return null;
   return parseInt(s, 16);
+}
+
+function memberHasAnyRole(member, roleIds) {
+  return roleIds.some((rid) => member.roles.cache.has(rid));
+}
+
+function isStaff(member) {
+  if (!member) return false;
+  if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+  return memberHasAnyRole(member, STAFF_ROLE_IDS);
 }
 
 async function ensureAutoModRole(guild) {
@@ -251,23 +271,6 @@ function invitesStillInServer(inviterId) {
   const s = ensureInviterStats(inviterId);
   const base = (s.joins || 0) + (s.rejoins || 0) - (s.left || 0);
   return Math.max(0, base + (s.manual || 0));
-}
-
-function saveInvites() {
-  saveJson(INVITES_FILE, invitesData);
-}
-function saveGiveaways() {
-  saveJson(GIVEAWAYS_FILE, giveawayData);
-}
-
-function memberHasAnyRole(member, roleIds) {
-  return roleIds.some((rid) => member.roles.cache.has(rid));
-}
-
-function isStaff(member) {
-  if (!member) return false;
-  if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
-  return memberHasAnyRole(member, STAFF_ROLE_IDS);
 }
 
 /* ===================== INVITE CACHE ===================== */
@@ -320,7 +323,7 @@ function makeGiveawayEmbed(gw) {
 
   return new EmbedBuilder()
     .setTitle(`🎁 GIVEAWAY — ${gw.prize}`)
-    .setColor(0xed4245) // red
+    .setColor(0xed4245)
     .setDescription(
       `Ends: <t:${endUnix}:R> (<t:${endUnix}:F>)\n` +
         `Hosted by: <@${gw.hostId}>\n` +
@@ -355,12 +358,7 @@ async function endGiveaway(messageId, endedByUserId = null) {
 
   const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
   if (msg) {
-    await msg
-      .edit({
-        embeds: [makeGiveawayEmbed(gw)],
-        components: [giveawayRow(gw)],
-      })
-      .catch(() => {});
+    await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] }).catch(() => {});
   }
 
   if (!gw.entries.length) {
@@ -435,15 +433,13 @@ function isTicketChannel(channel) {
 }
 
 function findOpenTicketChannel(guild, openerId) {
-  return guild.channels.cache.find((c) => {
-    if (c.type !== ChannelType.GuildText) return false;
-    return c.topic && c.topic.includes(`opener:${openerId}`);
-  });
+  return guild.channels.cache.find((c) => c.type === ChannelType.GuildText && c.topic?.includes(`opener:${openerId}`));
 }
 
-/* ===================== STICKY ===================== */
+/* ===================== STICKY + OPERATION TIMERS ===================== */
 
 const stickyByChannel = new Map(); // channelId -> { content, messageId }
+const activeOperations = new Map(); // channelId -> timeout handle
 
 /* ===================== SLASH COMMAND REGISTRATION ===================== */
 
@@ -451,7 +447,6 @@ async function registerSlashCommands() {
   if (!process.env.TOKEN) throw new Error("Missing TOKEN");
   if (!GUILD_ID) throw new Error("Missing GUILD_ID");
 
-  // ✅ SIMPLE /embed builder (UNDER LIMITS)
   const embedCmd = new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a custom embed (admin only).")
@@ -469,22 +464,24 @@ async function registerSlashCommands() {
     .addStringOption((o) => o.setName("thumbnail").setDescription("Thumbnail image URL").setRequired(false))
     .addStringOption((o) => o.setName("image").setDescription("Main image URL").setRequired(false));
 
-  const giveawayCmd = new SlashCommandBuilder()
-    .setName("giveaway")
-    .setDescription("Start a giveaway with a join button.")
-    .addStringOption((o) => o.setName("duration").setDescription("e.g. 30m 1h 2d").setRequired(true))
-    .addIntegerOption((o) => o.setName("winners").setDescription("How many winners").setRequired(true))
-    .addStringOption((o) => o.setName("prize").setDescription("Prize").setRequired(true))
-    .addIntegerOption((o) =>
-      o
-        .setName("min_invites")
-        .setDescription("Minimum invites needed to join (optional)")
-        .setMinValue(0)
-        .setRequired(false)
-    );
-
   const commands = [
     embedCmd,
+
+    new SlashCommandBuilder()
+      .setName("link")
+      .setDescription("Staff/Admin: show who a user invited + invite links they use.")
+      .addUserOption((o) => o.setName("user").setDescription("User to inspect").setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName("operation")
+      .setDescription("Admin: give customer role + ping vouch now, close ticket after timer.")
+      .addSubcommand((sub) =>
+        sub
+          .setName("start")
+          .setDescription("Start operation timer in this ticket.")
+          .addStringOption((o) => o.setName("duration").setDescription("e.g. 10m, 1h, 2d").setRequired(true))
+      )
+      .addSubcommand((sub) => sub.setName("cancel").setDescription("Cancel operation timer in this ticket.")),
 
     new SlashCommandBuilder().setName("vouches").setDescription("Shows how many vouches this server has."),
 
@@ -518,7 +515,19 @@ async function registerSlashCommands() {
       .setDescription("Close the current ticket (DMs opener the reason).")
       .addStringOption((o) => o.setName("reason").setDescription("Reason").setRequired(true)),
 
-    giveawayCmd,
+    new SlashCommandBuilder()
+      .setName("giveaway")
+      .setDescription("Start a giveaway with a join button.")
+      .addStringOption((o) => o.setName("duration").setDescription("e.g. 30m 1h 2d").setRequired(true))
+      .addIntegerOption((o) => o.setName("winners").setDescription("How many winners").setRequired(true))
+      .addStringOption((o) => o.setName("prize").setDescription("Prize").setRequired(true))
+      .addIntegerOption((o) =>
+        o
+          .setName("min_invites")
+          .setDescription("Minimum invites needed to join (optional)")
+          .setMinValue(0)
+          .setRequired(false)
+      ),
 
     new SlashCommandBuilder()
       .setName("end")
@@ -541,9 +550,6 @@ async function registerSlashCommands() {
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // show env presence in logs (helps debug)
-  console.log("GUILD_ID is:", process.env.GUILD_ID ? "SET" : "MISSING");
-
   try {
     await registerSlashCommands();
   } catch (e) {
@@ -551,15 +557,10 @@ client.once("ready", async () => {
   }
 
   for (const guild of client.guilds.cache.values()) {
-    try {
-      await ensureAutoModRole(guild);
-    } catch {}
-    try {
-      await refreshGuildInvites(guild);
-    } catch {}
+    try { await ensureAutoModRole(guild); } catch {}
+    try { await refreshGuildInvites(guild); } catch {}
   }
 
-  // reschedule giveaways
   for (const messageId of Object.keys(giveawayData.giveaways || {})) {
     const gw = giveawayData.giveaways[messageId];
     if (gw && !gw.ended) scheduleGiveawayEnd(messageId);
@@ -568,16 +569,8 @@ client.once("ready", async () => {
 
 /* ===================== INVITE EVENTS + JOIN/LEAVE ===================== */
 
-client.on("inviteCreate", async (invite) => {
-  try {
-    await refreshGuildInvites(invite.guild);
-  } catch {}
-});
-client.on("inviteDelete", async (invite) => {
-  try {
-    await refreshGuildInvites(invite.guild);
-  } catch {}
-});
+client.on("inviteCreate", async (invite) => { try { await refreshGuildInvites(invite.guild); } catch {} });
+client.on("inviteDelete", async (invite) => { try { await refreshGuildInvites(invite.guild); } catch {} });
 
 client.on("guildMemberAdd", async (member) => {
   try {
@@ -597,10 +590,7 @@ client.on("guildMemberAdd", async (member) => {
     for (const inv of invites.values()) {
       const prev = before.get(inv.code) ?? 0;
       const now = inv.uses ?? 0;
-      if (now > prev) {
-        used = inv;
-        break;
-      }
+      if (now > prev) { used = inv; break; }
     }
 
     const after = new Map();
@@ -625,6 +615,15 @@ client.on("guildMemberAdd", async (member) => {
     else stats.joins += 1;
 
     invitesData.memberInviter[member.id] = creditedInviterId;
+
+    invitesData.invitedMembers[creditedInviterId] ??= {};
+    invitesData.invitedMembers[creditedInviterId][member.id] = {
+      inviteCode: used.code,
+      joinedAt: Date.now(),
+      active: true,
+      leftAt: null,
+    };
+
     saveInvites();
 
     const still = invitesStillInServer(creditedInviterId);
@@ -638,8 +637,16 @@ client.on("guildMemberRemove", async (member) => {
   try {
     const inviterId = invitesData.memberInviter[member.id];
     if (!inviterId) return;
+
     const stats = ensureInviterStats(inviterId);
     stats.left += 1;
+
+    invitesData.invitedMembers[inviterId] ??= {};
+    if (invitesData.invitedMembers[inviterId][member.id]) {
+      invitesData.invitedMembers[inviterId][member.id].active = false;
+      invitesData.invitedMembers[inviterId][member.id].leftAt = Date.now();
+    }
+
     saveInvites();
   } catch {}
 });
@@ -659,16 +666,12 @@ client.on("interactionCreate", async (interaction) => {
       if (need > 0) {
         const have = invitesStillInServer(interaction.user.id);
         if (have < need) {
-          return interaction.reply({
-            content: `❌ You need **${need}** invites to join this giveaway. You have **${have}**.`,
-            ephemeral: true,
-          });
+          return interaction.reply({ content: `❌ Need **${need}** invites. You have **${have}**.`, ephemeral: true });
         }
       }
 
       const userId = interaction.user.id;
       const idx = gw.entries.indexOf(userId);
-
       if (idx === -1) gw.entries.push(userId);
       else gw.entries.splice(idx, 1);
 
@@ -680,10 +683,7 @@ client.on("interactionCreate", async (interaction) => {
         await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] });
       } catch {}
 
-      return interaction.reply({
-        content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.",
-        ephemeral: true,
-      });
+      return interaction.reply({ content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.", ephemeral: true });
     }
 
     // Ticket buttons -> modal
@@ -734,7 +734,6 @@ client.on("interactionCreate", async (interaction) => {
       const need = (interaction.fields.getTextInputValue("need") || "").trim();
 
       const category = await getOrCreateCategory(interaction.guild, type.category);
-
       const channelName = `${type.key}-${cleanName(interaction.user.username)}`.slice(0, 90);
 
       const overwrites = [
@@ -782,6 +781,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
 
+      /* ---------- /embed ---------- */
       if (name === "embed") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -793,12 +793,6 @@ client.on("interactionCreate", async (interaction) => {
           return interaction.reply({ content: "Invalid channel.", ephemeral: true });
         }
 
-        const me = await interaction.guild.members.fetchMe();
-        const perms = targetChannel.permissionsFor(me);
-        if (!perms?.has(PermissionsBitField.Flags.SendMessages)) {
-          return interaction.reply({ content: "I can't send messages in that channel.", ephemeral: true });
-        }
-
         const title = interaction.options.getString("title", false);
         const description = interaction.options.getString("description", false);
         const colorInput = interaction.options.getString("color", false);
@@ -807,10 +801,7 @@ client.on("interactionCreate", async (interaction) => {
         const image = interaction.options.getString("image", false);
 
         if (!title && !description && !thumbnail && !image) {
-          return interaction.reply({
-            content: "Provide at least title/description/image/thumbnail.",
-            ephemeral: true,
-          });
+          return interaction.reply({ content: "Provide at least title/description/image/thumbnail.", ephemeral: true });
         }
 
         const embed = new EmbedBuilder();
@@ -829,6 +820,7 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
 
+      /* ---------- /vouches ---------- */
       if (name === "vouches") {
         await interaction.deferReply();
 
@@ -850,20 +842,19 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply(`This server has **${total}** vouches.`);
       }
 
+      /* ---------- /invites ---------- */
       if (name === "invites") {
         const user = interaction.options.getUser("user", true);
         const count = invitesStillInServer(user.id);
         return interaction.reply(`📨 **${user.tag}** has **${count}** invites still in the server.`);
       }
 
+      /* ---------- /generate ---------- */
       if (name === "generate") {
         const me = await interaction.guild.members.fetchMe();
         const canCreate = interaction.channel.permissionsFor(me)?.has(PermissionsBitField.Flags.CreateInstantInvite);
         if (!canCreate) {
-          return interaction.reply({
-            content: "❌ I need **Create Invite** permission in this channel to generate an invite.",
-            ephemeral: true,
-          });
+          return interaction.reply({ content: "❌ I need **Create Invite** permission in this channel.", ephemeral: true });
         }
 
         const invite = await interaction.channel.createInvite({
@@ -873,7 +864,6 @@ client.on("interactionCreate", async (interaction) => {
           reason: `Invite generated for ${interaction.user.tag}`,
         });
 
-        invitesData.inviteOwners ??= {};
         invitesData.inviteOwners[invite.code] = interaction.user.id;
         saveInvites();
 
@@ -882,14 +872,13 @@ client.on("interactionCreate", async (interaction) => {
         );
 
         return interaction.reply({
-          content:
-            `✅ Here’s your personal invite link (credited to you in OUR invites system):\n${invite.url}\n\n` +
-            `Tip: Right-click / tap-and-hold → **Copy Link**.`,
+          content: `✅ Your personal invite link (credited to you):\n${invite.url}\n\nTip: tap-and-hold → Copy Link`,
           components: [row],
           ephemeral: true,
         });
       }
 
+      /* ---------- /linkinvite ---------- */
       if (name === "linkinvite") {
         const input = interaction.options.getString("code", true);
         const code = extractInviteCode(input);
@@ -905,16 +894,13 @@ client.on("interactionCreate", async (interaction) => {
           return interaction.reply({ content: "❌ That invite code wasn’t found in this server.", ephemeral: true });
         }
 
-        invitesData.inviteOwners ??= {};
         invitesData.inviteOwners[code] = interaction.user.id;
         saveInvites();
 
-        return interaction.reply({
-          content: `✅ Linked invite **${code}** to you. Joins using it will count toward your invites.`,
-          ephemeral: true,
-        });
+        return interaction.reply({ content: `✅ Linked invite **${code}** to you.`, ephemeral: true });
       }
 
+      /* ---------- /addinvites ---------- */
       if (name === "addinvites") {
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
           return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
@@ -929,6 +915,7 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply(`✅ Added **${amount}** invites to **${user.tag}**.`);
       }
 
+      /* ---------- /resetinvites ---------- */
       if (name === "resetinvites") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const allowed = memberHasAnyRole(member, RESETINVITES_ROLE_IDS);
@@ -938,11 +925,13 @@ client.on("interactionCreate", async (interaction) => {
 
         const user = interaction.options.getUser("user", true);
         invitesData.inviterStats[user.id] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
+        delete invitesData.invitedMembers[user.id];
         saveInvites();
 
         return interaction.reply(`✅ Reset invite stats for **${user.tag}**.`);
       }
 
+      /* ---------- /resetall ---------- */
       if (name === "resetall") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -951,11 +940,14 @@ client.on("interactionCreate", async (interaction) => {
 
         invitesData.inviterStats = {};
         invitesData.memberInviter = {};
+        invitesData.inviteOwners = {};
+        invitesData.invitedMembers = {};
         saveInvites();
 
         return interaction.reply("✅ Reset invite stats for **everyone** in this server.");
       }
 
+      /* ---------- /close ---------- */
       if (name === "close") {
         const channel = interaction.channel;
         if (!isTicketChannel(channel)) {
@@ -973,6 +965,12 @@ client.on("interactionCreate", async (interaction) => {
           return interaction.reply({ content: "Only the opener or staff can close this.", ephemeral: true });
         }
 
+        // cancel operation timer if running
+        if (activeOperations.has(channel.id)) {
+          clearTimeout(activeOperations.get(channel.id));
+          activeOperations.delete(channel.id);
+        }
+
         try {
           const openerUser = await client.users.fetch(openerId);
           await openerUser.send(
@@ -985,6 +983,127 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
 
+      /* ---------- /link ---------- */
+      if (name === "link") {
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+
+        const target = interaction.options.getUser("user", true);
+
+        const invitedMap = invitesData.invitedMembers?.[target.id] || {};
+        const invitedIds = Object.keys(invitedMap);
+
+        const activeInvited = [];
+        for (const invitedId of invitedIds) {
+          const rec = invitedMap[invitedId];
+          if (!rec?.active) continue;
+          const m = await interaction.guild.members.fetch(invitedId).catch(() => null);
+          if (!m) continue;
+          activeInvited.push({ tag: m.user.tag, code: rec.inviteCode || "unknown" });
+        }
+
+        const guildInvites = await interaction.guild.invites.fetch().catch(() => null);
+        const codes = new Set();
+
+        if (guildInvites) {
+          guildInvites.forEach((inv) => {
+            if (inv.inviter?.id === target.id) codes.add(inv.code);
+          });
+        }
+
+        for (const [code, ownerId] of Object.entries(invitesData.inviteOwners || {})) {
+          if (ownerId === target.id) codes.add(code);
+        }
+
+        const codeList = [...codes].slice(0, 15);
+        const inviteLinks =
+          codeList.length ? codeList.map((c) => `https://discord.gg/${c}`).join("\n") : "None found.";
+
+        const listText =
+          activeInvited.length
+            ? activeInvited.slice(0, 30).map((x, i) => `${i + 1}. ${x.tag} (code: ${x.code})`).join("\n")
+            : "No active invited members found.";
+
+        return interaction.reply({
+          ephemeral: true,
+          content:
+            `**Invites for:** ${target.tag}\n\n` +
+            `**Active invited members (still credited):**\n${listText}\n\n` +
+            `**Invite link(s) they use:**\n${inviteLinks}`,
+        });
+      }
+
+      /* ---------- /operation ---------- */
+      if (name === "operation") {
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({ content: "Admins only.", ephemeral: true });
+        }
+
+        if (!isTicketChannel(interaction.channel)) {
+          return interaction.reply({ content: "Use /operation inside a ticket channel.", ephemeral: true });
+        }
+
+        const sub = interaction.options.getSubcommand();
+
+        if (sub === "cancel") {
+          if (!activeOperations.has(interaction.channel.id)) {
+            return interaction.reply({ content: "No active operation timer in this ticket.", ephemeral: true });
+          }
+          clearTimeout(activeOperations.get(interaction.channel.id));
+          activeOperations.delete(interaction.channel.id);
+          return interaction.reply({ content: "🛑 Operation cancelled.", ephemeral: true });
+        }
+
+        const durationStr = interaction.options.getString("duration", true);
+        const ms = parseDurationToMs(durationStr);
+        if (!ms) return interaction.reply({ content: "Invalid duration. Use 10m, 1h, 2d.", ephemeral: true });
+
+        const openerId = getOpenerIdFromTopic(interaction.channel.topic);
+        if (!openerId) return interaction.reply({ content: "Couldn't find ticket opener.", ephemeral: true });
+
+        const openerMember = await interaction.guild.members.fetch(openerId).catch(() => null);
+        if (!openerMember) return interaction.reply({ content: "Couldn't fetch ticket opener.", ephemeral: true });
+
+        const botMe = await interaction.guild.members.fetchMe();
+        if (!botMe.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+          return interaction.reply({ content: "I need **Manage Roles** permission.", ephemeral: true });
+        }
+
+        const role = await interaction.guild.roles.fetch(CUSTOMER_ROLE_ID).catch(() => null);
+        if (!role) return interaction.reply({ content: "Customer role not found (wrong role ID?).", ephemeral: true });
+
+        if (role.position >= botMe.roles.highest.position) {
+          return interaction.reply({
+            content: "Move the bot role above the customer role in Server Settings → Roles.",
+            ephemeral: true,
+          });
+        }
+
+        await openerMember.roles.add(role, `Customer role given by /operation from ${interaction.user.tag}`).catch(() => {});
+
+        await interaction.channel
+          .send(`<@${openerId}> please go to <#${VOUCHES_CHANNEL_ID}> and drop a vouch for us. Thank you!`)
+          .catch(() => {});
+
+        // restart timer if already exists
+        if (activeOperations.has(interaction.channel.id)) {
+          clearTimeout(activeOperations.get(interaction.channel.id));
+          activeOperations.delete(interaction.channel.id);
+        }
+
+        const timeout = setTimeout(async () => {
+          const ch = await client.channels.fetch(interaction.channel.id).catch(() => null);
+          if (!ch || ch.type !== ChannelType.GuildText) return;
+          ch.delete().catch(() => {});
+          activeOperations.delete(interaction.channel.id);
+        }, ms);
+
+        activeOperations.set(interaction.channel.id, timeout);
+        return interaction.reply({ content: `✅ Operation started. Ticket closes in **${durationStr}**.`, ephemeral: true });
+      }
+
+      /* ---------- /giveaway ---------- */
       if (name === "giveaway") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
@@ -998,7 +1117,6 @@ client.on("interactionCreate", async (interaction) => {
         if (!ms) return interaction.reply({ content: "Invalid duration. Use 30m, 1h, 2d, etc.", ephemeral: true });
         if (winners < 1) return interaction.reply({ content: "Winners must be at least 1.", ephemeral: true });
         if (!prize) return interaction.reply({ content: "Prize cannot be empty.", ephemeral: true });
-        if (minInvites < 0) return interaction.reply({ content: "min_invites must be 0 or higher.", ephemeral: true });
 
         const gw = {
           guildId: interaction.guild.id,
@@ -1024,17 +1142,12 @@ client.on("interactionCreate", async (interaction) => {
         giveawayData.giveaways[gw.messageId] = gw;
         saveGiveaways();
 
-        await sent
-          .edit({
-            embeds: [makeGiveawayEmbed(gw)],
-            components: [giveawayRow(gw)],
-          })
-          .catch(() => {});
-
+        await sent.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] }).catch(() => {});
         scheduleGiveawayEnd(gw.messageId);
         return;
       }
 
+      /* ---------- /end ---------- */
       if (name === "end") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
@@ -1048,6 +1161,7 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply(res.ok ? "✅ Giveaway ended." : `❌ ${res.msg}`);
       }
 
+      /* ---------- /reroll ---------- */
       if (name === "reroll") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
