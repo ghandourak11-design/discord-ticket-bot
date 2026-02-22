@@ -1,21 +1,34 @@
 /**
  * DonutDemand Bot — Single File (discord.js v14)
  *
- * FIX: /settings not appearing
- *  - Uses CLIENT_ID (Application ID) for registration (more reliable than client.user.id in some hosts)
- *  - Optional DEV_GUILD_ID for INSTANT command appearance while testing
- *  - Logs registered command names + catches/registers errors clearly
+ * ✅ GLOBAL slash commands (work in every server) OR guild-only for instant testing
+ * ✅ NO hardcoded role/channel IDs (all per-server via /settings)
+ * ✅ OWNER override (bot owner can run everything anywhere)
+ * ✅ /stop <server_id> + /resume <server_id> (OWNER only)
+ * ✅ /sync (OWNER only) — fixes duped/missing commands by re-registering + optionally clearing
+ *
+ * FIXES INCLUDED:
+ * 1) Reliable slash registration using CLIENT_ID (Application ID) — not client.user.id
+ * 2) Prevent “duped commands” by letting you choose ONE registration scope:
+ *    - REGISTER_SCOPE=global   (default)
+ *    - REGISTER_SCOPE=guild    (instant, dev/testing; uses DEV_GUILD_ID)
+ * 3) /sync command exists in code AND registration; also has a prefix fallback: !sync (OWNER)
+ * 4) Crash protection: logs unhandled rejections/exceptions instead of hard-crashing
  *
  * ENV:
  *   TOKEN=your_bot_token
  *   CLIENT_ID=your_application_id
- *   DEV_GUILD_ID=your_test_server_id   (optional, recommended while testing)
+ *
+ * Optional:
+ *   REGISTER_SCOPE=global|guild     (default global)
+ *   DEV_GUILD_ID=your_test_server_id (required if REGISTER_SCOPE=guild)
+ *   CLEAR_GLOBAL_ON_GUILD=true|false (default false)  // if true, clears global cmds when in guild mode
  *
  * Intents to enable in Dev Portal:
  *   - Server Members Intent
  *   - Message Content Intent
  *
- * Invite scopes (must be):
+ * Invite scopes:
  * ✅ bot
  * ✅ applications.commands
  */
@@ -41,6 +54,15 @@ const {
   Routes,
   SlashCommandBuilder,
 } = require("discord.js");
+
+/* ===================== CRASH PROTECTION ===================== */
+
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ unhandledRejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("❌ uncaughtException:", err);
+});
 
 /* ===================== BASICS ===================== */
 
@@ -653,11 +675,9 @@ function scheduleGiveawayEnd(messageId) {
   }, Math.min(delay, MAX));
 }
 
-/* ===================== SLASH COMMANDS (GLOBAL / GUILD) ===================== */
+/* ===================== SLASH COMMANDS REGISTRATION ===================== */
 
 function buildCommandsJSON() {
-  // NOTE: This /settings definition is valid for Discord and WILL register.
-  // The main reason /settings "doesn't show" is bad registration (wrong app id) or global delay.
   const settingsCmd = new SlashCommandBuilder()
     .setName("settings")
     .setDescription("Admin: configure this bot for your server.")
@@ -745,11 +765,7 @@ function buildCommandsJSON() {
         .setName("post")
         .setDescription("Post the ticket panel using saved config.")
         .addChannelOption((o) =>
-          o
-            .setName("channel")
-            .setDescription("Channel to post in (optional)")
-            .addChannelTypes(ChannelType.GuildText)
-            .setRequired(false)
+          o.setName("channel").setDescription("Channel to post in (optional)").addChannelTypes(ChannelType.GuildText).setRequired(false)
         )
     )
     .addSubcommand((sub) => sub.setName("show").setDescription("Show current saved panel config (ephemeral)."))
@@ -767,22 +783,29 @@ function buildCommandsJSON() {
     .setDMPermission(false)
     .addStringOption((o) => o.setName("server_id").setDescription("Guild ID").setRequired(true));
 
-  // OPTIONAL: owner command to force re-sync commands in a server instantly
+  // /sync: owner tool to fix missing/duped commands
   const syncCmd = new SlashCommandBuilder()
     .setName("sync")
-    .setDescription("OWNER: re-register slash commands for THIS server instantly.")
-    .setDMPermission(false);
+    .setDescription("OWNER: fix commands for this server (and optionally clear).")
+    .setDMPermission(false)
+    .addStringOption((o) =>
+      o
+        .setName("mode")
+        .setDescription("What to do")
+        .setRequired(false)
+        .addChoices(
+          { name: "register_here", value: "register_here" },
+          { name: "clear_here", value: "clear_here" },
+          { name: "clear_global", value: "clear_global" }
+        )
+    );
 
   const embedCmd = new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a custom embed (admin only).")
     .setDMPermission(false)
     .addChannelOption((o) =>
-      o
-        .setName("channel")
-        .setDescription("Channel to send embed in (optional)")
-        .addChannelTypes(ChannelType.GuildText)
-        .setRequired(false)
+      o.setName("channel").setDescription("Channel to send embed in (optional)").addChannelTypes(ChannelType.GuildText).setRequired(false)
     )
     .addStringOption((o) => o.setName("title").setDescription("Embed title").setRequired(false))
     .addStringOption((o) => o.setName("description").setDescription("Embed description").setRequired(false))
@@ -792,7 +815,7 @@ function buildCommandsJSON() {
     .addStringOption((o) => o.setName("image").setDescription("Main image URL").setRequired(false));
 
   const invitesCmds = [
-    new SlashCommandBuilder().setName("vouches").setDescription("Count vouch messages (set channel in /settings).").setDMPermission(false),
+    new SlashCommandBuilder().setName("vouches").setDescription("Shows how many messages are in the vouches channel (configured in /settings).").setDMPermission(false),
     new SlashCommandBuilder()
       .setName("invites")
       .setDescription("Shows invites still in the server for a user.")
@@ -837,9 +860,7 @@ function buildCommandsJSON() {
       sub
         .setName("start")
         .setDescription("Start operation timer in this ticket.")
-        .addStringOption((o) =>
-          o.setName("duration").setDescription("e.g. 10m, 1h, 2d").setRequired(true)
-        )
+        .addStringOption((o) => o.setName("duration").setDescription("e.g. 10m, 1h, 2d").setRequired(true))
     )
     .addSubcommand((sub) => sub.setName("cancel").setDescription("Cancel operation timer in this ticket."));
 
@@ -851,13 +872,7 @@ function buildCommandsJSON() {
       .addStringOption((o) => o.setName("duration").setDescription("e.g. 30m 1h 2d").setRequired(true))
       .addIntegerOption((o) => o.setName("winners").setDescription("How many winners").setRequired(true))
       .addStringOption((o) => o.setName("prize").setDescription("Prize").setRequired(true))
-      .addIntegerOption((o) =>
-        o
-          .setName("min_invites")
-          .setDescription("Minimum invites needed to join (optional)")
-          .setMinValue(0)
-          .setRequired(false)
-      ),
+      .addIntegerOption((o) => o.setName("min_invites").setDescription("Minimum invites needed to join (optional)").setMinValue(0).setRequired(false)),
     new SlashCommandBuilder()
       .setName("end")
       .setDescription("End a giveaway early (staff/admin).")
@@ -875,7 +890,7 @@ function buildCommandsJSON() {
     panelCmd,
     stopCmd,
     resumeCmd,
-    syncCmd, // <— NEW
+    syncCmd,
     embedCmd,
     ...invitesCmds,
     closeCmd,
@@ -883,30 +898,59 @@ function buildCommandsJSON() {
     ...giveawayCmds,
   ].map((c) => c.toJSON());
 
-  // Helpful console visibility
-  console.log("🧾 Commands being registered:", cmds.map((x) => x.name).join(", "));
-
+  // If your bot "crashes" during register, this log helps confirm what's being sent.
+  console.log("🧾 Commands payload:", cmds.map((x) => x.name).join(", "));
   return cmds;
 }
 
-async function registerSlashCommandsGlobal() {
+function getRest() {
   if (!process.env.TOKEN) throw new Error("Missing TOKEN");
   if (!process.env.CLIENT_ID) throw new Error("Missing CLIENT_ID (Application ID)");
-
-  const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
-  const body = buildCommandsJSON();
-  await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body });
-  console.log("✅ GLOBAL slash commands registered (may take time to appear)");
+  return new REST({ version: "10" }).setToken(process.env.TOKEN);
 }
 
-async function registerSlashCommandsGuild(guildId) {
-  if (!process.env.TOKEN) throw new Error("Missing TOKEN");
-  if (!process.env.CLIENT_ID) throw new Error("Missing CLIENT_ID (Application ID)");
+async function registerGlobal() {
+  const rest = getRest();
+  const body = buildCommandsJSON();
+  await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body });
+  console.log("✅ Registered GLOBAL slash commands");
+}
 
-  const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
+async function registerGuild(guildId) {
+  const rest = getRest();
   const body = buildCommandsJSON();
   await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body });
-  console.log(`✅ GUILD slash commands registered instantly for guild ${guildId}`);
+  console.log(`✅ Registered GUILD slash commands for guild ${guildId}`);
+}
+
+async function clearGlobal() {
+  const rest = getRest();
+  await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [] });
+  console.log("🧹 Cleared GLOBAL slash commands");
+}
+
+async function clearGuild(guildId) {
+  const rest = getRest();
+  await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body: [] });
+  console.log(`🧹 Cleared GUILD slash commands for guild ${guildId}`);
+}
+
+async function autoRegisterOnStartup() {
+  const scope = (process.env.REGISTER_SCOPE || "global").toLowerCase().trim();
+  const devGuild = (process.env.DEV_GUILD_ID || "").trim();
+  const clearGlobalOnGuild = String(process.env.CLEAR_GLOBAL_ON_GUILD || "false").toLowerCase() === "true";
+
+  if (scope === "guild") {
+    if (!/^\d{10,25}$/.test(devGuild)) {
+      throw new Error("REGISTER_SCOPE=guild requires DEV_GUILD_ID in .env");
+    }
+    if (clearGlobalOnGuild) await clearGlobal().catch(() => {});
+    await registerGuild(devGuild);
+    return;
+  }
+
+  // default global
+  await registerGlobal();
 }
 
 /* ===================== READY ===================== */
@@ -919,18 +963,16 @@ client.once("ready", async () => {
   } catch {}
 
   try {
-    // If DEV_GUILD_ID is set, commands appear instantly in that server (fixes the “/settings doesn’t pop up” problem)
-    if (process.env.DEV_GUILD_ID) await registerSlashCommandsGuild(process.env.DEV_GUILD_ID);
-    else await registerSlashCommandsGlobal();
+    await autoRegisterOnStartup();
   } catch (e) {
     console.log("❌ Slash register failed:", e?.message || e);
   }
 
+  // Warm caches + schedule giveaways
   for (const guild of client.guilds.cache.values()) {
     await refreshGuildInvites(guild).catch(() => {});
     getGuildSettings(guild.id);
   }
-
   for (const messageId of Object.keys(giveawayData.giveaways || {})) {
     const gw = giveawayData.giveaways[messageId];
     if (gw && !gw.ended) scheduleGiveawayEnd(messageId);
@@ -1013,9 +1055,7 @@ client.on("guildMemberAdd", async (member) => {
     saveInvites();
 
     const still = invitesStillInServer(creditedInviterId);
-    await logChannel.send(
-      `${member} has been invited by <@${creditedInviterId}> and now has **${still}** invites.`
-    );
+    await logChannel.send(`${member} has been invited by <@${creditedInviterId}> and now has **${still}** invites.`);
   } catch {}
 });
 
@@ -1041,8 +1081,9 @@ client.on("guildMemberRemove", async (member) => {
 
 client.on("interactionCreate", async (interaction) => {
   try {
-    if (!interaction.guild) return;
+    if (!interaction.guild) return; // ignore DMs
 
+    // OWNER only commands still run even if stopped:
     const isOwnerCmd =
       interaction.isChatInputCommand() &&
       (interaction.commandName === "stop" || interaction.commandName === "resume" || interaction.commandName === "sync");
@@ -1062,9 +1103,7 @@ client.on("interactionCreate", async (interaction) => {
       const need = gw.minInvites || 0;
       if (need > 0) {
         const have = invitesStillInServer(interaction.user.id);
-        if (have < need) {
-          return interaction.reply({ content: `❌ Need **${need}** invites. You have **${have}**.`, ephemeral: true });
-        }
+        if (have < need) return interaction.reply({ content: `❌ Need **${need}** invites. You have **${have}**.`, ephemeral: true });
       }
 
       const userId = interaction.user.id;
@@ -1080,10 +1119,7 @@ client.on("interactionCreate", async (interaction) => {
         await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] });
       } catch {}
 
-      return interaction.reply({
-        content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.",
-        ephemeral: true,
-      });
+      return interaction.reply({ content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.", ephemeral: true });
     }
 
     // Ticket buttons -> modal
@@ -1114,11 +1150,7 @@ client.on("interactionCreate", async (interaction) => {
         .setRequired(true)
         .setMaxLength(1000);
 
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(mcInput),
-        new ActionRowBuilder().addComponents(needInput)
-      );
-
+      modal.addComponents(new ActionRowBuilder().addComponents(mcInput), new ActionRowBuilder().addComponents(needInput));
       return interaction.showModal(modal);
     }
 
@@ -1146,19 +1178,11 @@ client.on("interactionCreate", async (interaction) => {
         { id: interaction.guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
         {
           id: interaction.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
         },
         ...(s.staffRoleIds || []).map((rid) => ({
           id: rid,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
         })),
       ];
 
@@ -1189,19 +1213,37 @@ client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     const name = interaction.commandName;
 
-    /* ---------- /stop /resume /sync (OWNER only) ---------- */
-    if (name === "stop" || name === "resume" || name === "sync") {
+    /* ---------- /sync (OWNER) ---------- */
+    if (name === "sync") {
       if (!isOwner(interaction.user.id)) {
         return interaction.reply({ content: "Only Adam can use this command.", ephemeral: true });
       }
+      const mode = interaction.options.getString("mode", false) || "register_here";
+      await interaction.deferReply({ ephemeral: true });
 
-      if (name === "sync") {
-        // instant server-only resync
-        await interaction.deferReply({ ephemeral: true });
-        await registerSlashCommandsGuild(interaction.guild.id);
-        return interaction.editReply("✅ Re-registered slash commands for this server. Try typing `/settings` now.");
+      try {
+        if (mode === "clear_here") {
+          await clearGuild(interaction.guild.id);
+          return interaction.editReply("🧹 Cleared THIS server's commands. Now run `/sync mode:register_here`.");
+        }
+        if (mode === "clear_global") {
+          await clearGlobal();
+          return interaction.editReply("🧹 Cleared GLOBAL commands.");
+        }
+
+        // register_here
+        await registerGuild(interaction.guild.id);
+        return interaction.editReply("✅ Re-registered commands for THIS server. Type `/settings` now.");
+      } catch (e) {
+        return interaction.editReply(`❌ Sync failed: ${e?.message || e}`);
       }
+    }
 
+    /* ---------- /stop & /resume (OWNER only) ---------- */
+    if (name === "stop" || name === "resume") {
+      if (!isOwner(interaction.user.id)) {
+        return interaction.reply({ content: "Only Adam can use this command.", ephemeral: true });
+      }
       const guildId = interaction.options.getString("server_id", true).trim();
       if (!/^\d{10,25}$/.test(guildId)) return interaction.reply({ content: "Invalid server ID.", ephemeral: true });
 
@@ -1216,7 +1258,7 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    /* ---------- /settings (Admin only; OWNER override) ---------- */
+    /* ---------- /settings ---------- */
     if (name === "settings") {
       const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
       if (!member || !isAdminOrOwner(member)) return interaction.reply({ content: "Admins only.", ephemeral: true });
@@ -1343,8 +1385,7 @@ client.on("interactionCreate", async (interaction) => {
       if (sub === "post") {
         const cfg = getPanelConfig(interaction.guild.id);
         const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
-        if (!targetChannel || targetChannel.type !== ChannelType.GuildText)
-          return interaction.reply({ content: "Invalid channel.", ephemeral: true });
+        if (!targetChannel || targetChannel.type !== ChannelType.GuildText) return interaction.reply({ content: "Invalid channel.", ephemeral: true });
 
         const v = validatePanelConfig(cfg);
         if (!v.ok) return interaction.reply({ content: `❌ Saved config invalid: ${v.msg}`, ephemeral: true });
@@ -1362,8 +1403,7 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
-      if (!targetChannel || targetChannel.type !== ChannelType.GuildText)
-        return interaction.reply({ content: "Invalid channel.", ephemeral: true });
+      if (!targetChannel || targetChannel.type !== ChannelType.GuildText) return interaction.reply({ content: "Invalid channel.", ephemeral: true });
 
       const title = interaction.options.getString("title", false);
       const description = interaction.options.getString("description", false);
@@ -1372,8 +1412,7 @@ client.on("interactionCreate", async (interaction) => {
       const thumbnail = interaction.options.getString("thumbnail", false);
       const image = interaction.options.getString("image", false);
 
-      if (!title && !description && !thumbnail && !image)
-        return interaction.reply({ content: "Provide at least title/description/image/thumbnail.", ephemeral: true });
+      if (!title && !description && !thumbnail && !image) return interaction.reply({ content: "Provide at least title/description/image/thumbnail.", ephemeral: true });
 
       const e = new EmbedBuilder();
       if (title) e.setTitle(String(title).slice(0, 256));
@@ -1392,11 +1431,7 @@ client.on("interactionCreate", async (interaction) => {
     /* ---------- /vouches ---------- */
     if (name === "vouches") {
       const s = getGuildSettings(interaction.guild.id);
-      if (!s.vouchesChannelId)
-        return interaction.reply({
-          content: "Set vouches channel first: `/settings set_channel type:vouches channel:#...`",
-          ephemeral: true,
-        });
+      if (!s.vouchesChannelId) return interaction.reply({ content: "Set vouches channel first: `/settings set_channel type:vouches channel:#...`", ephemeral: true });
 
       await interaction.deferReply({ ephemeral: true });
       const channel = await interaction.guild.channels.fetch(s.vouchesChannelId).catch(() => null);
@@ -1417,10 +1452,7 @@ client.on("interactionCreate", async (interaction) => {
     /* ---------- /invites ---------- */
     if (name === "invites") {
       const user = interaction.options.getUser("user", true);
-      return interaction.reply({
-        content: `📨 **${user.tag}** has **${invitesStillInServer(user.id)}** invites still in the server.`,
-        ephemeral: true,
-      });
+      return interaction.reply({ content: `📨 **${user.tag}** has **${invitesStillInServer(user.id)}** invites still in the server.`, ephemeral: true });
     }
 
     /* ---------- /generate ---------- */
@@ -1429,25 +1461,12 @@ client.on("interactionCreate", async (interaction) => {
       const canCreate = interaction.channel.permissionsFor(me)?.has(PermissionsBitField.Flags.CreateInstantInvite);
       if (!canCreate) return interaction.reply({ content: "❌ I need **Create Invite** permission in this channel.", ephemeral: true });
 
-      const invite = await interaction.channel.createInvite({
-        maxAge: 0,
-        maxUses: 0,
-        unique: true,
-        reason: `Invite generated for ${interaction.user.tag}`,
-      });
-
+      const invite = await interaction.channel.createInvite({ maxAge: 0, maxUses: 0, unique: true, reason: `Invite generated for ${interaction.user.tag}` });
       invitesData.inviteOwners[invite.code] = interaction.user.id;
       saveInvites();
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel("Open Invite").setURL(invite.url)
-      );
-
-      return interaction.reply({
-        content: `✅ Your personal invite link (credited to you):\n${invite.url}`,
-        components: [row],
-        ephemeral: true,
-      });
+      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel("Open Invite").setURL(invite.url));
+      return interaction.reply({ content: `✅ Your personal invite link (credited to you):\n${invite.url}`, components: [row], ephemeral: true });
     }
 
     /* ---------- /linkinvite ---------- */
@@ -1611,9 +1630,7 @@ client.on("interactionCreate", async (interaction) => {
 
       const sub = interaction.options.getSubcommand();
       if (sub === "cancel") {
-        if (!activeOperations.has(interaction.channel.id)) {
-          return interaction.reply({ content: "No active operation timer in this ticket.", ephemeral: true });
-        }
+        if (!activeOperations.has(interaction.channel.id)) return interaction.reply({ content: "No active operation timer in this ticket.", ephemeral: true });
         clearTimeout(activeOperations.get(interaction.channel.id));
         activeOperations.delete(interaction.channel.id);
         return interaction.reply({ content: "🛑 Operation cancelled.", ephemeral: true });
@@ -1628,31 +1645,20 @@ client.on("interactionCreate", async (interaction) => {
       if (!openerId) return interaction.reply({ content: "Couldn't find ticket opener.", ephemeral: true });
 
       const s = getGuildSettings(interaction.guild.id);
-      if (!s.customerRoleId) {
-        return interaction.reply({
-          content: "Set customer role first: `/settings set_customer_role role:@Role`",
-          ephemeral: true,
-        });
-      }
+      if (!s.customerRoleId) return interaction.reply({ content: "Set customer role first: `/settings set_customer_role role:@Role`", ephemeral: true });
 
       const openerMember = await interaction.guild.members.fetch(openerId).catch(() => null);
       if (!openerMember) return interaction.reply({ content: "Couldn't fetch ticket opener.", ephemeral: true });
 
       const botMe = await interaction.guild.members.fetchMe();
-      if (!botMe.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
-        return interaction.reply({ content: "I need **Manage Roles** permission.", ephemeral: true });
-      }
+      if (!botMe.permissions.has(PermissionsBitField.Flags.ManageRoles)) return interaction.reply({ content: "I need **Manage Roles** permission.", ephemeral: true });
 
       const role = await interaction.guild.roles.fetch(s.customerRoleId).catch(() => null);
       if (!role) return interaction.reply({ content: "Customer role not found (check /settings).", ephemeral: true });
-      if (role.position >= botMe.roles.highest.position) {
-        return interaction.reply({ content: "Move the bot role above the customer role in Server Settings → Roles.", ephemeral: true });
-      }
+      if (role.position >= botMe.roles.highest.position) return interaction.reply({ content: "Move the bot role above the customer role in Server Settings → Roles.", ephemeral: true });
 
       await openerMember.roles.add(role, `Customer role given by /operation from ${interaction.user.tag}`).catch(() => {});
-      if (s.vouchesChannelId) {
-        await interaction.channel.send(`<@${openerId}> please go to <#${s.vouchesChannelId}> and drop a vouch for us. Thank you!`).catch(() => {});
-      }
+      if (s.vouchesChannelId) await interaction.channel.send(`<@${openerId}> please go to <#${s.vouchesChannelId}> and drop a vouch for us. Thank you!`).catch(() => {});
 
       if (activeOperations.has(interaction.channel.id)) {
         clearTimeout(activeOperations.get(interaction.channel.id));
@@ -1761,6 +1767,7 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild || message.author.bot) return;
 
+    // stop gate (OWNER bypass)
     if (!isOwner(message.author.id) && isStopped(message.guild.id)) {
       await message.channel.send("Adam has restricted commands in your server.").catch(() => {});
       return;
@@ -1768,6 +1775,7 @@ client.on("messageCreate", async (message) => {
 
     const s = getGuildSettings(message.guild.id);
 
+    // automod link blocker (configurable)
     if (s.automod?.enabled && containsLink(message.content) && !isOwner(message.author.id)) {
       const member = message.member;
       if (member) {
@@ -1787,9 +1795,36 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    const canUsePrefix =
-      isOwner(message.author.id) || message.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+    // OWNER fallback: !sync (fixes commands even if slash sync isn't visible yet)
+    if (message.content.startsWith(PREFIX) && isOwner(message.author.id)) {
+      const parts = message.content.slice(PREFIX.length).trim().split(/\s+/);
+      const cmd = (parts.shift() || "").toLowerCase();
 
+      if (cmd === "sync") {
+        // default: register commands for this guild
+        const mode = (parts[0] || "register_here").toLowerCase();
+        try {
+          if (mode === "clear_here") {
+            await clearGuild(message.guild.id);
+            await message.reply("🧹 Cleared THIS server's commands. Now do `!sync register_here`.");
+            return;
+          }
+          if (mode === "clear_global") {
+            await clearGlobal();
+            await message.reply("🧹 Cleared GLOBAL commands.");
+            return;
+          }
+          await registerGuild(message.guild.id);
+          await message.reply("✅ Re-registered commands for THIS server. Type `/settings` now.");
+        } catch (e) {
+          await message.reply(`❌ Sync failed: ${e?.message || e}`);
+        }
+        return;
+      }
+    }
+
+    // Admin-only ! commands (OWNER override)
+    const canUsePrefix = isOwner(message.author.id) || message.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
     if (message.content.startsWith(PREFIX) && canUsePrefix) {
       const parts = message.content.slice(PREFIX.length).trim().split(/\s+/);
       const cmd = (parts.shift() || "").toLowerCase();
@@ -1870,6 +1905,7 @@ client.on("messageCreate", async (message) => {
       }
     }
 
+    // sticky behavior
     const sticky = stickyByChannel.get(message.channel.id);
     if (sticky) {
       if (sticky.messageId && message.id === sticky.messageId) return;
@@ -1896,14 +1932,15 @@ if (!process.env.CLIENT_ID) {
 client.login(process.env.TOKEN);
 
 /**
- * IMPORTANT FOR / COMMANDS TO SHOW UP:
- * Invite scopes:
- * ✅ bot
- * ✅ applications.commands
+ * IMPORTANT:
+ * If you had duped commands before, do THIS ONCE:
+ * 1) In the server: type `!sync clear_here` (owner)
+ * 2) Then: `!sync register_here`
  *
- * BEST FIX IF /settings STILL DOESN’T SHOW:
- * 1) Set DEV_GUILD_ID in .env (your test server)
- * 2) Restart bot
- * 3) Run /sync (as owner) inside that server
- * 4) Type /settings
+ * If you also have global dupes and want to wipe global:
+ * 1) `!sync clear_global`
+ *
+ * BEST PRACTICE:
+ * - Use REGISTER_SCOPE=global for production
+ * - Use REGISTER_SCOPE=guild + DEV_GUILD_ID for testing (instant updates)
  */
