@@ -1,18 +1,49 @@
 /**
  * DonutDemand Bot — Full
  *
- * Changes you requested:
- * ✅ /panel slash command (ADMIN only) replaces !ticketpanel
- *    - Fully configurable via ONE JSON string (stays under Discord option caps)
- *    - /panel set <json> saves config
- *    - /panel post [channel] posts the panel using saved config
+ * ✅ GLOBAL slash commands (work in EVERY server your bot is in)
+ *    - Uses Routes.applicationCommands(client.user.id)
  *
- * ✅ Ticket close DM is now a FULL EMBED (more like “real ticket bots”)
- *    - Includes server, ticket type, ticket name, closer, reason, opened time, closed time, next steps
+ * ✅ /panel (ADMIN only) to configure + post ticket panel per-server
+ *    /panel set <json>
+ *    /panel post [channel]
+ *    /panel show
+ *    /panel reset
  *
- * Notes on Discord caps:
- * - Slash commands have hard limits on number of options per command (max 25).
- * - To let you customize “everything” without hitting caps, /panel uses ONE string option: JSON config.
+ * ✅ Tickets:
+ *   - 4 types -> 4 categories (auto-create)
+ *   - Modal BEFORE opening asks:
+ *       - What is your Minecraft username?
+ *       - What do you need?
+ *   - Only 1 open ticket per user
+ *   - Staff roles can view tickets
+ *
+ * ✅ /close:
+ *   - Only opener OR staff/admin
+ *   - DMs opener a “real ticket bot” style embed with details
+ *   - Deletes ticket after 3 seconds
+ *
+ * ✅ Invites:
+ *   - Persistent JSON
+ *   - Tracks joins / rejoins / leaves / manual
+ *   - Join log message
+ *   - /generate, /linkinvite, /invites, /link, /addinvites, /resetinvites, /resetall
+ *
+ * ✅ Automod:
+ *   - Blocks links unless Admin OR has role named "automod" (auto-created if possible)
+ *
+ * ✅ Giveaways:
+ *   - /giveaway, /end, /reroll with join button
+ *
+ * ✅ Prefix admin commands (Administrator only):
+ *   - !stick / !unstick / !mute / !ban / !kick / !purge
+ *
+ * ENV:
+ *  TOKEN=...
+ *
+ * Dev Portal Intents to enable:
+ *  - Server Members Intent
+ *  - Message Content Intent
  */
 
 require("dotenv").config();
@@ -40,15 +71,13 @@ const {
 /* ===================== CONFIG ===================== */
 
 const PREFIX = "!";
-const GUILD_ID = process.env.GUILD_ID;
-
 const AUTOMOD_ROLE_NAME = "automod";
 
 /** Your updated IDs */
 const CUSTOMER_ROLE_ID = "1474606828875677858";
 const VOUCHES_CHANNEL_ID = "1474606921305821466";
 
-/** unchanged */
+/** unchanged (edit if needed) */
 const JOIN_LOG_CHANNEL_ID = "1461947323541225704";
 
 // Staff roles that can SEE tickets + /link + giveaways + /close
@@ -63,17 +92,16 @@ const STAFF_ROLE_IDS = [
 const RESETINVITES_ROLE_IDS = [...STAFF_ROLE_IDS];
 
 /* ===================== DEFAULT PANEL CONFIG ===================== */
-/**
- * You can override ALL of this with /panel set (JSON).
- * Limit: max 4 ticket types (keeps UI clean + safe with Discord component limits)
- */
+
 const DEFAULT_PANEL_CONFIG = {
   embed: {
     title: "Tickets",
     description:
-      "Open the right ticket type below.\n\n" +
-      "🆘 Help & Support\n💰 Claim Order\n💸 Sell To Us\n🎁 Rewards",
-    color: "#2b2d31",
+      "🆘| Help & Support Ticket\nIf you need help with anything, create a support ticket.\n\n" +
+      "💰| Claim Order\nIf you have placed an order and are waiting to receive it please open this ticket.\n\n" +
+      "💸| Sell To us\nWant to make some real cash off the donutsmp? Open a ticket and sell to us here.\n\n" +
+      "🎁| Claim Rewards Ticket\nLooking to claim rewards, make this ticket.",
+    color: "#FF0000",
   },
   modal: {
     title: "Ticket Info",
@@ -97,10 +125,10 @@ const DEFAULT_PANEL_CONFIG = {
     },
     {
       id: "ticket_sell",
-      label: "Sell To Us",
-      category: "Sell to Us",
+      label: "Sell To us",
+      category: "Sell To us",
       key: "sell-to-us",
-      button: { label: "Sell To Us", style: "Secondary", emoji: "💸" },
+      button: { label: "Sell To us", style: "Secondary", emoji: "💸" },
     },
     {
       id: "ticket_rewards",
@@ -140,7 +168,6 @@ const invitesData = loadJson(INVITES_FILE, {
   inviteOwners: {}, // inviteCode -> userId (custom credit owner)
   invitedMembers: {}, // inviterId -> { memberId: { inviteCode, joinedAt, active, leftAt } }
 });
-
 invitesData.inviterStats ??= {};
 invitesData.memberInviter ??= {};
 invitesData.inviteOwners ??= {};
@@ -151,10 +178,6 @@ const giveawayData = loadJson(GIVEAWAYS_FILE, { giveaways: {} });
 giveawayData.giveaways ??= {};
 saveJson(GIVEAWAYS_FILE, giveawayData);
 
-/**
- * Panel config storage is per-guild:
- * { byGuild: { [guildId]: <config> } }
- */
 const panelStore = loadJson(PANEL_FILE, { byGuild: {} });
 panelStore.byGuild ??= {};
 saveJson(PANEL_FILE, panelStore);
@@ -280,7 +303,6 @@ function ensureInviterStats(inviterId) {
   return invitesData.inviterStats[inviterId];
 }
 
-// still in server ONLY
 function invitesStillInServer(inviterId) {
   const s = ensureInviterStats(inviterId);
   const base = (s.joins || 0) + (s.rejoins || 0) - (s.left || 0);
@@ -322,7 +344,7 @@ function validatePanelConfig(cfg) {
   const tickets = Array.isArray(cfg.tickets) ? cfg.tickets : null;
 
   if (!tickets || tickets.length < 1) return { ok: false, msg: "Config must include tickets: [...] with at least 1 type." };
-  if (tickets.length > 4) return { ok: false, msg: "Max 4 ticket types (Discord component + clean UI limit)." };
+  if (tickets.length > 4) return { ok: false, msg: "Max 4 ticket types (fits in one button row)." };
 
   const title = String(embed.title ?? "").trim();
   const desc = String(embed.description ?? "").trim();
@@ -330,7 +352,7 @@ function validatePanelConfig(cfg) {
 
   if (!title || title.length > 256) return { ok: false, msg: "embed.title is required and must be <= 256 chars." };
   if (!desc || desc.length > 4000) return { ok: false, msg: "embed.description is required and must be <= 4000 chars." };
-  if (color && !parseHexColor(color)) return { ok: false, msg: "embed.color must be a hex like #2b2d31." };
+  if (color && !parseHexColor(color)) return { ok: false, msg: "embed.color must be a hex like #FF0000." };
 
   const mTitle = String(modal.title ?? "Ticket Info");
   const mcLabel = String(modal.mcLabel ?? "What is your Minecraft username?");
@@ -371,6 +393,27 @@ function validatePanelConfig(cfg) {
   return { ok: true, msg: "OK" };
 }
 
+function buildTicketPanelMessage(config) {
+  const c = parseHexColor(config.embed?.color) ?? 0x2b2d31;
+  const embed = new EmbedBuilder()
+    .setTitle(String(config.embed?.title || "Tickets").slice(0, 256))
+    .setDescription(String(config.embed?.description || "Open a ticket below.").slice(0, 4000))
+    .setColor(c);
+
+  const row = new ActionRowBuilder();
+  for (const t of config.tickets) {
+    const b = t.button || {};
+    const btn = new ButtonBuilder()
+      .setCustomId(`ticket:${t.id}`)
+      .setLabel(String(b.label || t.label).slice(0, 80))
+      .setStyle(normalizeButtonStyle(b.style || "Primary"));
+    if (b.emoji) btn.setEmoji(String(b.emoji));
+    row.addComponents(btn);
+  }
+
+  return { embeds: [embed], components: [row] };
+}
+
 /* ===================== TICKETS ===================== */
 
 async function getOrCreateCategory(guild, name) {
@@ -389,11 +432,7 @@ function getTicketMetaFromTopic(topic) {
   const created = topic.match(/created:(\d{10,20})/i)?.[1] || null;
   const typeId = topic.match(/type:([a-z0-9_\-]{1,100})/i)?.[1] || null;
   if (!opener) return null;
-  return {
-    openerId: opener,
-    createdAt: created ? Number(created) : null,
-    typeId,
-  };
+  return { openerId: opener, createdAt: created ? Number(created) : null, typeId };
 }
 
 function isTicketChannel(channel) {
@@ -412,35 +451,11 @@ function resolveTicketType(config, typeId) {
   return (config.tickets || []).find((t) => t.id === typeId) || null;
 }
 
-function buildTicketPanelMessage(config) {
-  const c = parseHexColor(config.embed?.color) ?? 0x2b2d31;
-
-  const embed = new EmbedBuilder()
-    .setTitle(String(config.embed?.title || "Tickets").slice(0, 256))
-    .setDescription(String(config.embed?.description || "Open a ticket below.").slice(0, 4000))
-    .setColor(c);
-
-  const row = new ActionRowBuilder();
-
-  for (const t of config.tickets) {
-    const b = t.button || {};
-    const btn = new ButtonBuilder()
-      .setCustomId(`ticket:${t.id}`)
-      .setLabel(String(b.label || t.label).slice(0, 80))
-      .setStyle(normalizeButtonStyle(b.style || "Primary"));
-
-    if (b.emoji) btn.setEmoji(String(b.emoji));
-    row.addComponents(btn);
-  }
-
-  return { embeds: [embed], components: [row] };
-}
-
 function buildCloseDmEmbed({ guild, ticketChannelName, ticketTypeLabel, openedAtMs, closedByTag, reason }) {
   const openedUnix = openedAtMs ? Math.floor(openedAtMs / 1000) : null;
   const closedUnix = Math.floor(Date.now() / 1000);
 
-  const e = new EmbedBuilder()
+  return new EmbedBuilder()
     .setTitle("Ticket Closed")
     .setColor(0xed4245)
     .setDescription("Your ticket has been closed. Details below:")
@@ -449,23 +464,19 @@ function buildCloseDmEmbed({ guild, ticketChannelName, ticketTypeLabel, openedAt
       { name: "Ticket", value: `${ticketChannelName}`, inline: true },
       { name: "Type", value: ticketTypeLabel || "Unknown", inline: true },
       { name: "Closed By", value: closedByTag || "Unknown", inline: true },
-      { name: "Reason", value: String(reason || "No reason provided").slice(0, 1024), inline: false }
-    )
-    .addFields(
+      { name: "Reason", value: String(reason || "No reason provided").slice(0, 1024), inline: false },
       { name: "Opened", value: openedUnix ? `<t:${openedUnix}:F> (<t:${openedUnix}:R>)` : "Unknown", inline: true },
-      { name: "Closed", value: `<t:${closedUnix}:F> (<t:${closedUnix}:R>)`, inline: true }
+      { name: "Closed", value: `<t:${closedUnix}:F> (<t:${closedUnix}:R>)`, inline: true },
+      {
+        name: "Next Steps",
+        value:
+          `• If you still need help, open a new ticket from the ticket panel.\n` +
+          `• Please consider leaving a vouch in <#${VOUCHES_CHANNEL_ID}>.\n` +
+          `• Keep your DMs open so you don’t miss updates.`,
+        inline: false,
+      }
     )
-    .addFields({
-      name: "Next Steps",
-      value:
-        "• If you still need help, open a new ticket from the ticket panel.\n" +
-        "• If this was resolved, please consider leaving a vouch in the vouches channel.\n" +
-        "• Keep your DMs open so you don’t miss updates.",
-      inline: false,
-    })
     .setFooter({ text: "DonutDemand Support" });
-
-  return e;
 }
 
 /* ===================== STICKY + OPERATION TIMERS ===================== */
@@ -545,9 +556,7 @@ async function endGiveaway(messageId, endedByUserId = null) {
   if (!channel) return { ok: false, msg: "Channel not found." };
 
   const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
-  if (msg) {
-    await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] }).catch(() => {});
-  }
+  if (msg) await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] }).catch(() => {});
 
   if (!gw.entries.length) {
     await channel.send(`No entries — giveaway for **${gw.prize}** ended with no winners.`).catch(() => {});
@@ -602,21 +611,16 @@ function scheduleGiveawayEnd(messageId) {
   }, Math.min(delay, MAX));
 }
 
-/* ===================== SLASH COMMAND REGISTRATION ===================== */
+/* ===================== SLASH COMMAND REGISTRATION (GLOBAL) ===================== */
 
-async function registerSlashCommands() {
+async function registerSlashCommandsGlobal() {
   if (!process.env.TOKEN) throw new Error("Missing TOKEN");
-  if (!GUILD_ID) throw new Error("Missing GUILD_ID");
 
   const embedCmd = new SlashCommandBuilder()
     .setName("embed")
     .setDescription("Send a custom embed (admin only).")
     .addChannelOption((o) =>
-      o
-        .setName("channel")
-        .setDescription("Channel to send embed in (optional)")
-        .addChannelTypes(ChannelType.GuildText)
-        .setRequired(false)
+      o.setName("channel").setDescription("Channel to send embed in (optional)").addChannelTypes(ChannelType.GuildText).setRequired(false)
     )
     .addStringOption((o) => o.setName("title").setDescription("Embed title").setRequired(false))
     .addStringOption((o) => o.setName("description").setDescription("Embed description").setRequired(false))
@@ -632,26 +636,15 @@ async function registerSlashCommands() {
       sub
         .setName("set")
         .setDescription("Save ticket panel config JSON for this server.")
-        .addStringOption((o) =>
-          o
-            .setName("json")
-            .setDescription("Panel config JSON (embed/title/buttons/categories/etc).")
-            .setRequired(true)
-        )
+        .addStringOption((o) => o.setName("json").setDescription("Panel config JSON.").setRequired(true))
     )
     .addSubcommand((sub) =>
       sub
         .setName("post")
         .setDescription("Post the ticket panel using saved config.")
-        .addChannelOption((o) =>
-          o
-            .setName("channel")
-            .setDescription("Channel to post in (optional)")
-            .addChannelTypes(ChannelType.GuildText)
-            .setRequired(false)
-        )
+        .addChannelOption((o) => o.setName("channel").setDescription("Channel to post in (optional)").addChannelTypes(ChannelType.GuildText).setRequired(false))
     )
-    .addSubcommand((sub) => sub.setName("show").setDescription("Show the current saved panel config (ephemeral)."))
+    .addSubcommand((sub) => sub.setName("show").setDescription("Show current saved panel config (ephemeral)."))
     .addSubcommand((sub) => sub.setName("reset").setDescription("Reset panel config back to default."));
 
   const commands = [
@@ -667,10 +660,7 @@ async function registerSlashCommands() {
       .setName("operation")
       .setDescription("Admin: give customer role + ping vouch now, close ticket after timer.")
       .addSubcommand((sub) =>
-        sub
-          .setName("start")
-          .setDescription("Start operation timer in this ticket.")
-          .addStringOption((o) => o.setName("duration").setDescription("e.g. 10m, 1h, 2d").setRequired(true))
+        sub.setName("start").setDescription("Start operation timer in this ticket.").addStringOption((o) => o.setName("duration").setDescription("e.g. 10m, 1h, 2d").setRequired(true))
       )
       .addSubcommand((sub) => sub.setName("cancel").setDescription("Cancel operation timer in this ticket.")),
 
@@ -712,13 +702,7 @@ async function registerSlashCommands() {
       .addStringOption((o) => o.setName("duration").setDescription("e.g. 30m 1h 2d").setRequired(true))
       .addIntegerOption((o) => o.setName("winners").setDescription("How many winners").setRequired(true))
       .addStringOption((o) => o.setName("prize").setDescription("Prize").setRequired(true))
-      .addIntegerOption((o) =>
-        o
-          .setName("min_invites")
-          .setDescription("Minimum invites needed to join (optional)")
-          .setMinValue(0)
-          .setRequired(false)
-      ),
+      .addIntegerOption((o) => o.setName("min_invites").setDescription("Minimum invites needed to join (optional)").setMinValue(0).setRequired(false)),
 
     new SlashCommandBuilder()
       .setName("end")
@@ -732,8 +716,10 @@ async function registerSlashCommands() {
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
-  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
-  console.log("✅ Slash commands registered");
+
+  // ✅ GLOBAL registration (works everywhere)
+  await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+  console.log("✅ GLOBAL slash commands registered (may take some time to appear everywhere)");
 }
 
 /* ===================== READY ===================== */
@@ -742,7 +728,7 @@ client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   try {
-    await registerSlashCommands();
+    await registerSlashCommandsGlobal();
   } catch (e) {
     console.log("❌ Slash register failed:", e.message);
   }
@@ -760,6 +746,16 @@ client.once("ready", async () => {
     const gw = giveawayData.giveaways[messageId];
     if (gw && !gw.ended) scheduleGiveawayEnd(messageId);
   }
+});
+
+// when bot joins a new server
+client.on("guildCreate", async (guild) => {
+  try {
+    await ensureAutoModRole(guild);
+  } catch {}
+  try {
+    await refreshGuildInvites(guild);
+  } catch {}
 });
 
 /* ===================== INVITE EVENTS + JOIN/LEAVE ===================== */
@@ -871,9 +867,7 @@ client.on("interactionCreate", async (interaction) => {
       const need = gw.minInvites || 0;
       if (need > 0) {
         const have = invitesStillInServer(interaction.user.id);
-        if (have < need) {
-          return interaction.reply({ content: `❌ Need **${need}** invites. You have **${have}**.`, ephemeral: true });
-        }
+        if (have < need) return interaction.reply({ content: `❌ Need **${need}** invites. You have **${have}**.`, ephemeral: true });
       }
 
       const userId = interaction.user.id;
@@ -889,13 +883,10 @@ client.on("interactionCreate", async (interaction) => {
         await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] });
       } catch {}
 
-      return interaction.reply({
-        content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.",
-        ephemeral: true,
-      });
+      return interaction.reply({ content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.", ephemeral: true });
     }
 
-    // Ticket buttons -> modal (uses CURRENT saved config)
+    // Ticket buttons -> modal
     if (interaction.isButton() && interaction.customId.startsWith("ticket:")) {
       const typeId = interaction.customId.split("ticket:")[1];
       const config = getPanelConfig(interaction.guild.id);
@@ -903,9 +894,7 @@ client.on("interactionCreate", async (interaction) => {
       if (!ticketType) return interaction.reply({ content: "This ticket type no longer exists.", ephemeral: true });
 
       const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
-      if (existing) {
-        return interaction.reply({ content: `❌ You already have an open ticket: ${existing}`, ephemeral: true });
-      }
+      if (existing) return interaction.reply({ content: `❌ You already have an open ticket: ${existing}`, ephemeral: true });
 
       const modal = new ModalBuilder()
         .setCustomId(`ticket_modal:${ticketType.id}`)
@@ -934,9 +923,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.deferReply({ ephemeral: true });
 
       const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
-      if (existing) {
-        return interaction.editReply(`❌ You already have an open ticket: ${existing}`);
-      }
+      if (existing) return interaction.editReply(`❌ You already have an open ticket: ${existing}`);
 
       const typeId = interaction.customId.split("ticket_modal:")[1];
       const config = getPanelConfig(interaction.guild.id);
@@ -953,19 +940,11 @@ client.on("interactionCreate", async (interaction) => {
         { id: interaction.guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
         {
           id: interaction.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
         },
         ...STAFF_ROLE_IDS.map((rid) => ({
           id: rid,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
+          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
         })),
       ];
 
@@ -999,19 +978,14 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /panel ---------- */
       if (name === "panel") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "Admins only.", ephemeral: true });
-        }
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Admins only.", ephemeral: true });
 
         const sub = interaction.options.getSubcommand();
 
         if (sub === "show") {
           const cfg = getPanelConfig(interaction.guild.id);
           const json = JSON.stringify(cfg, null, 2);
-          // keep reply safe size
-          if (json.length > 1800) {
-            return interaction.reply({ content: "Config is too large to display here. Use /panel reset or re-set it.", ephemeral: true });
-          }
+          if (json.length > 1800) return interaction.reply({ content: "Config too large to show here.", ephemeral: true });
           return interaction.reply({ content: "```json\n" + json + "\n```", ephemeral: true });
         }
 
@@ -1023,17 +997,13 @@ client.on("interactionCreate", async (interaction) => {
 
         if (sub === "set") {
           const raw = interaction.options.getString("json", true);
-
-          // Extra safety: don’t let someone paste a novel
-          if (raw.length > 6000) {
-            return interaction.reply({ content: "❌ JSON too long. Keep it under ~6000 characters.", ephemeral: true });
-          }
+          if (raw.length > 6000) return interaction.reply({ content: "❌ JSON too long. Keep it under ~6000 chars.", ephemeral: true });
 
           let cfg;
           try {
             cfg = JSON.parse(raw);
           } catch {
-            return interaction.reply({ content: "❌ Invalid JSON. Make sure it’s valid JSON format.", ephemeral: true });
+            return interaction.reply({ content: "❌ Invalid JSON.", ephemeral: true });
           }
 
           const v = validatePanelConfig(cfg);
@@ -1047,17 +1017,12 @@ client.on("interactionCreate", async (interaction) => {
         if (sub === "post") {
           const cfg = getPanelConfig(interaction.guild.id);
           const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
-
-          if (!targetChannel || targetChannel.type !== ChannelType.GuildText) {
-            return interaction.reply({ content: "Invalid channel.", ephemeral: true });
-          }
+          if (!targetChannel || targetChannel.type !== ChannelType.GuildText) return interaction.reply({ content: "Invalid channel.", ephemeral: true });
 
           const v = validatePanelConfig(cfg);
-          if (!v.ok) return interaction.reply({ content: `❌ Saved config is invalid: ${v.msg}`, ephemeral: true });
+          if (!v.ok) return interaction.reply({ content: `❌ Saved config invalid: ${v.msg}`, ephemeral: true });
 
-          const msgPayload = buildTicketPanelMessage(cfg);
-          await targetChannel.send(msgPayload);
-
+          await targetChannel.send(buildTicketPanelMessage(cfg));
           return interaction.reply({ content: "✅ Posted ticket panel.", ephemeral: true });
         }
       }
@@ -1065,14 +1030,10 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /embed ---------- */
       if (name === "embed") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "Only administrators can use /embed.", ephemeral: true });
-        }
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Only administrators can use /embed.", ephemeral: true });
 
         const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
-        if (!targetChannel || targetChannel.type !== ChannelType.GuildText) {
-          return interaction.reply({ content: "Invalid channel.", ephemeral: true });
-        }
+        if (!targetChannel || targetChannel.type !== ChannelType.GuildText) return interaction.reply({ content: "Invalid channel.", ephemeral: true });
 
         const title = interaction.options.getString("title", false);
         const description = interaction.options.getString("description", false);
@@ -1081,34 +1042,29 @@ client.on("interactionCreate", async (interaction) => {
         const thumbnail = interaction.options.getString("thumbnail", false);
         const image = interaction.options.getString("image", false);
 
-        if (!title && !description && !thumbnail && !image) {
-          return interaction.reply({ content: "Provide at least title/description/image/thumbnail.", ephemeral: true });
-        }
+        if (!title && !description && !thumbnail && !image) return interaction.reply({ content: "Provide at least title/description/image/thumbnail.", ephemeral: true });
 
-        const embed = new EmbedBuilder();
-        if (title) embed.setTitle(String(title).slice(0, 256));
-        if (description) embed.setDescription(String(description).slice(0, 4096));
-        if (url) embed.setURL(url);
+        const e = new EmbedBuilder();
+        if (title) e.setTitle(String(title).slice(0, 256));
+        if (description) e.setDescription(String(description).slice(0, 4096));
+        if (url) e.setURL(url);
 
         const c = parseHexColor(colorInput);
-        embed.setColor(c !== null ? c : 0x2b2d31);
+        e.setColor(c !== null ? c : 0x2b2d31);
 
-        if (thumbnail) embed.setThumbnail(thumbnail);
-        if (image) embed.setImage(image);
+        if (thumbnail) e.setThumbnail(thumbnail);
+        if (image) e.setImage(image);
 
         await interaction.reply({ content: "✅ Sent embed.", ephemeral: true });
-        await targetChannel.send({ embeds: [embed] });
+        await targetChannel.send({ embeds: [e] });
         return;
       }
 
       /* ---------- /vouches ---------- */
       if (name === "vouches") {
         await interaction.deferReply();
-
         const channel = await interaction.guild.channels.fetch(VOUCHES_CHANNEL_ID).catch(() => null);
-        if (!channel || channel.type !== ChannelType.GuildText) {
-          return interaction.editReply("Couldn't find the vouches channel.");
-        }
+        if (!channel || channel.type !== ChannelType.GuildText) return interaction.editReply("Couldn't find the vouches channel.");
 
         let total = 0;
         let lastId;
@@ -1119,44 +1075,27 @@ client.on("interactionCreate", async (interaction) => {
           lastId = msgs.last()?.id;
           if (!lastId) break;
         }
-
         return interaction.editReply(`This server has **${total}** vouches.`);
       }
 
       /* ---------- /invites ---------- */
       if (name === "invites") {
         const user = interaction.options.getUser("user", true);
-        const count = invitesStillInServer(user.id);
-        return interaction.reply(`📨 **${user.tag}** has **${count}** invites still in the server.`);
+        return interaction.reply(`📨 **${user.tag}** has **${invitesStillInServer(user.id)}** invites still in the server.`);
       }
 
       /* ---------- /generate ---------- */
       if (name === "generate") {
         const me = await interaction.guild.members.fetchMe();
         const canCreate = interaction.channel.permissionsFor(me)?.has(PermissionsBitField.Flags.CreateInstantInvite);
-        if (!canCreate) {
-          return interaction.reply({ content: "❌ I need **Create Invite** permission in this channel.", ephemeral: true });
-        }
+        if (!canCreate) return interaction.reply({ content: "❌ I need **Create Invite** permission in this channel.", ephemeral: true });
 
-        const invite = await interaction.channel.createInvite({
-          maxAge: 0,
-          maxUses: 0,
-          unique: true,
-          reason: `Invite generated for ${interaction.user.tag}`,
-        });
-
+        const invite = await interaction.channel.createInvite({ maxAge: 0, maxUses: 0, unique: true, reason: `Invite generated for ${interaction.user.tag}` });
         invitesData.inviteOwners[invite.code] = interaction.user.id;
         saveInvites();
 
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel("Open Invite").setURL(invite.url)
-        );
-
-        return interaction.reply({
-          content: `✅ Your personal invite link (credited to you):\n${invite.url}\n\nTip: tap-and-hold → Copy Link`,
-          components: [row],
-          ephemeral: true,
-        });
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel("Open Invite").setURL(invite.url));
+        return interaction.reply({ content: `✅ Your personal invite link (credited to you):\n${invite.url}`, components: [row], ephemeral: true });
       }
 
       /* ---------- /linkinvite ---------- */
@@ -1166,33 +1105,25 @@ client.on("interactionCreate", async (interaction) => {
         if (!code) return interaction.reply({ content: "❌ Invalid invite code.", ephemeral: true });
 
         const invites = await interaction.guild.invites.fetch().catch(() => null);
-        if (!invites) {
-          return interaction.reply({ content: "❌ I need invite permissions to verify invite codes.", ephemeral: true });
-        }
+        if (!invites) return interaction.reply({ content: "❌ I need invite permissions to verify invite codes.", ephemeral: true });
 
         const found = invites.find((inv) => inv.code === code);
-        if (!found) {
-          return interaction.reply({ content: "❌ That invite code wasn’t found in this server.", ephemeral: true });
-        }
+        if (!found) return interaction.reply({ content: "❌ That invite code wasn’t found in this server.", ephemeral: true });
 
         invitesData.inviteOwners[code] = interaction.user.id;
         saveInvites();
-
         return interaction.reply({ content: `✅ Linked invite **${code}** to you.`, ephemeral: true });
       }
 
       /* ---------- /addinvites ---------- */
       if (name === "addinvites") {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
-        }
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
         const user = interaction.options.getUser("user", true);
         const amount = interaction.options.getInteger("amount", true);
 
         const s = ensureInviterStats(user.id);
         s.manual += amount;
         saveInvites();
-
         return interaction.reply(`✅ Added **${amount}** invites to **${user.tag}**.`);
       }
 
@@ -1200,44 +1131,36 @@ client.on("interactionCreate", async (interaction) => {
       if (name === "resetinvites") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const allowed = memberHasAnyRole(member, RESETINVITES_ROLE_IDS);
-        if (!allowed) {
-          return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
-        }
+        if (!allowed) return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
 
         const user = interaction.options.getUser("user", true);
         invitesData.inviterStats[user.id] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
         delete invitesData.invitedMembers[user.id];
         saveInvites();
-
         return interaction.reply(`✅ Reset invite stats for **${user.tag}**.`);
       }
 
       /* ---------- /resetall ---------- */
       if (name === "resetall") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
-        }
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
 
         invitesData.inviterStats = {};
         invitesData.memberInviter = {};
         invitesData.inviteOwners = {};
         invitesData.invitedMembers = {};
         saveInvites();
-
         return interaction.reply("✅ Reset invite stats for **everyone** in this server.");
       }
 
       /* ---------- /close ---------- */
       if (name === "close") {
         const channel = interaction.channel;
-        if (!isTicketChannel(channel)) {
-          return interaction.reply({ content: "Use **/close** inside a ticket channel.", ephemeral: true });
-        }
+        if (!isTicketChannel(channel)) return interaction.reply({ content: "Use **/close** inside a ticket channel.", ephemeral: true });
 
         const meta = getTicketMetaFromTopic(channel.topic);
         const openerId = meta?.openerId;
-        const openedAt = meta?.createdAt;
+
         const config = getPanelConfig(interaction.guild.id);
         const t = resolveTicketType(config, meta?.typeId);
         const ticketTypeLabel = t?.label || "Unknown";
@@ -1247,30 +1170,27 @@ client.on("interactionCreate", async (interaction) => {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const isOpener = interaction.user.id === openerId;
         const canClose = isOpener || isStaff(member);
+        if (!canClose) return interaction.reply({ content: "Only the opener or staff can close this.", ephemeral: true });
 
-        if (!canClose) {
-          return interaction.reply({ content: "Only the opener or staff can close this.", ephemeral: true });
-        }
-
-        // cancel operation timer if running
         if (activeOperations.has(channel.id)) {
           clearTimeout(activeOperations.get(channel.id));
           activeOperations.delete(channel.id);
         }
 
-        // DM embed to opener
         try {
           const openerUser = await client.users.fetch(openerId);
-          const dmEmbed = buildCloseDmEmbed({
-            guild: interaction.guild,
-            ticketChannelName: channel.name,
-            ticketTypeLabel,
-            openedAtMs: openedAt,
-            closedByTag: interaction.user.tag,
-            reason,
+          await openerUser.send({
+            embeds: [
+              buildCloseDmEmbed({
+                guild: interaction.guild,
+                ticketChannelName: channel.name,
+                ticketTypeLabel,
+                openedAtMs: meta?.createdAt,
+                closedByTag: interaction.user.tag,
+                reason,
+              }),
+            ],
           });
-
-          await openerUser.send({ embeds: [dmEmbed] });
         } catch {}
 
         await interaction.reply({ content: "Closing ticket in 3 seconds...", ephemeral: true });
@@ -1300,15 +1220,8 @@ client.on("interactionCreate", async (interaction) => {
         const guildInvites = await interaction.guild.invites.fetch().catch(() => null);
         const codes = new Set();
 
-        if (guildInvites) {
-          guildInvites.forEach((inv) => {
-            if (inv.inviter?.id === target.id) codes.add(inv.code);
-          });
-        }
-
-        for (const [code, ownerId] of Object.entries(invitesData.inviteOwners || {})) {
-          if (ownerId === target.id) codes.add(code);
-        }
+        if (guildInvites) guildInvites.forEach((inv) => { if (inv.inviter?.id === target.id) codes.add(inv.code); });
+        for (const [code, ownerId] of Object.entries(invitesData.inviteOwners || {})) if (ownerId === target.id) codes.add(code);
 
         const codeList = [...codes].slice(0, 15);
         const inviteLinks = codeList.length ? codeList.map((c) => `https://discord.gg/${c}`).join("\n") : "None found.";
@@ -1329,20 +1242,13 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /operation ---------- */
       if (name === "operation") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "Admins only.", ephemeral: true });
-        }
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Admins only.", ephemeral: true });
 
-        if (!isTicketChannel(interaction.channel)) {
-          return interaction.reply({ content: "Use /operation inside a ticket channel.", ephemeral: true });
-        }
+        if (!isTicketChannel(interaction.channel)) return interaction.reply({ content: "Use /operation inside a ticket channel.", ephemeral: true });
 
         const sub = interaction.options.getSubcommand();
-
         if (sub === "cancel") {
-          if (!activeOperations.has(interaction.channel.id)) {
-            return interaction.reply({ content: "No active operation timer in this ticket.", ephemeral: true });
-          }
+          if (!activeOperations.has(interaction.channel.id)) return interaction.reply({ content: "No active operation timer in this ticket.", ephemeral: true });
           clearTimeout(activeOperations.get(interaction.channel.id));
           activeOperations.delete(interaction.channel.id);
           return interaction.reply({ content: "🛑 Operation cancelled.", ephemeral: true });
@@ -1360,27 +1266,17 @@ client.on("interactionCreate", async (interaction) => {
         if (!openerMember) return interaction.reply({ content: "Couldn't fetch ticket opener.", ephemeral: true });
 
         const botMe = await interaction.guild.members.fetchMe();
-        if (!botMe.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
-          return interaction.reply({ content: "I need **Manage Roles** permission.", ephemeral: true });
-        }
+        if (!botMe.permissions.has(PermissionsBitField.Flags.ManageRoles)) return interaction.reply({ content: "I need **Manage Roles** permission.", ephemeral: true });
 
         const role = await interaction.guild.roles.fetch(CUSTOMER_ROLE_ID).catch(() => null);
         if (!role) return interaction.reply({ content: "Customer role not found (wrong role ID?).", ephemeral: true });
-
         if (role.position >= botMe.roles.highest.position) {
-          return interaction.reply({
-            content: "Move the bot role above the customer role in Server Settings → Roles.",
-            ephemeral: true,
-          });
+          return interaction.reply({ content: "Move the bot role above the customer role in Server Settings → Roles.", ephemeral: true });
         }
 
         await openerMember.roles.add(role, `Customer role given by /operation from ${interaction.user.tag}`).catch(() => {});
+        await interaction.channel.send(`<@${openerId}> please go to <#${VOUCHES_CHANNEL_ID}> and drop a vouch for us. Thank you!`).catch(() => {});
 
-        await interaction.channel
-          .send(`<@${openerId}> please go to <#${VOUCHES_CHANNEL_ID}> and drop a vouch for us. Thank you!`)
-          .catch(() => {});
-
-        // restart timer if already exists
         if (activeOperations.has(interaction.channel.id)) {
           clearTimeout(activeOperations.get(interaction.channel.id));
           activeOperations.delete(interaction.channel.id);
@@ -1504,7 +1400,7 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    // Admin-only ! commands (kept)
+    // Admin-only ! commands
     if (message.content.startsWith(PREFIX)) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
@@ -1608,18 +1504,9 @@ client.on("messageCreate", async (message) => {
 
 client.login(process.env.TOKEN);
 
-/* ===================== HOW TO USE /panel (EXAMPLE JSON) ===================== */
 /**
- * /panel set json:{
- *   "embed":{"title":"Support","description":"Choose a ticket type below.","color":"#5865F2"},
- *   "modal":{"title":"Ticket Info","mcLabel":"Minecraft IGN","needLabel":"Explain what you need"},
- *   "tickets":[
- *     {"id":"ticket_support","label":"Help & Support","category":"Help & Support","key":"help-support",
- *      "button":{"label":"Support","style":"Primary","emoji":"🆘"}},
- *     {"id":"ticket_claim","label":"Claim Order","category":"Claim Order","key":"claim-order",
- *      "button":{"label":"Claim","style":"Success","emoji":"💰"}}
- *   ]
- * }
- *
- * /panel post (optional channel)
+ * IMPORTANT FOR / COMMANDS TO SHOW UP IN NEW SERVERS:
+ * When you invite the bot, include scopes:
+ * ✅ bot
+ * ✅ applications.commands
  */
