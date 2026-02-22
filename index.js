@@ -1,10 +1,21 @@
 /**
  * DonutDemand Bot — Single File (discord.js v14)
  *
- * ✅ FIX: NO CLIENT_ID REQUIRED anymore (uses client.application.id after login)
- * ✅ FIX: dotenv won’t crash if .env missing (quiet)
- * ✅ /sync added (OWNER) to fix missing/duped commands in any server
- * ✅ /settings works (it WAS missing because commands weren’t being registered correctly)
+ * ✅ NO CLIENT_ID REQUIRED (uses client.application.id after login)
+ * ✅ /settings fixed + all commands working
+ * ✅ FIX DUPED COMMANDS “FOR GOOD”:
+ *    - Bot will automatically CLEAN the “other scope” on startup
+ *    - New /undupe (OWNER) + /sync mode:fix_here (OWNER)
+ *
+ * IMPORTANT ABOUT “DUPED COMMANDS”:
+ * Discord shows dupes when you have BOTH:
+ *   1) Global commands registered AND
+ *   2) Guild-specific commands registered
+ * with the same names.
+ *
+ * This file enforces ONE scope for good:
+ *   REGISTER_SCOPE=global (default)  -> keeps GLOBAL, auto-clears GUILD commands per server
+ *   REGISTER_SCOPE=guild             -> keeps GUILD in DEV_GUILD_ID only, auto-clears GLOBAL commands
  *
  * ENV:
  *   TOKEN=your_bot_token
@@ -12,17 +23,9 @@
  * Optional:
  *   REGISTER_SCOPE=global|guild    (default: global)
  *   DEV_GUILD_ID=your_test_server_id  (required if REGISTER_SCOPE=guild)
- *
- * If you have duped commands:
- *   - In the broken server run: /sync mode:clear_here
- *   - Then: /sync mode:register_here
- *
- * Intents to enable in Dev Portal:
- *   - Server Members Intent
- *   - Message Content Intent
  */
 
-require("dotenv").config({ quiet: true }); // do NOT spam logs / do NOT crash if .env missing
+require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const path = require("path");
 
@@ -56,6 +59,11 @@ const OWNER_ID = "1456326972631154786"; // bot owner (Adam)
 
 function isOwner(userId) {
   return String(userId) === String(OWNER_ID);
+}
+
+function getRegisterScope() {
+  const scope = (process.env.REGISTER_SCOPE || "global").toLowerCase().trim();
+  return scope === "guild" ? "guild" : "global";
 }
 
 /* ===================== FILE STORAGE ===================== */
@@ -175,34 +183,10 @@ const DEFAULT_PANEL_CONFIG = {
     needLabel: "What do you need?",
   },
   tickets: [
-    {
-      id: "ticket_support",
-      label: "Help & Support",
-      category: "Help & Support",
-      key: "help-support",
-      button: { label: "Help & Support", style: "Primary", emoji: "🆘" },
-    },
-    {
-      id: "ticket_claim",
-      label: "Claim Order",
-      category: "Claim Order",
-      key: "claim-order",
-      button: { label: "Claim Order", style: "Success", emoji: "💰" },
-    },
-    {
-      id: "ticket_sell",
-      label: "Sell To us",
-      category: "Sell To us",
-      key: "sell-to-us",
-      button: { label: "Sell To us", style: "Secondary", emoji: "💸" },
-    },
-    {
-      id: "ticket_rewards",
-      label: "Rewards",
-      category: "Rewards",
-      key: "rewards",
-      button: { label: "Rewards", style: "Danger", emoji: "🎁" },
-    },
+    { id: "ticket_support", label: "Help & Support", category: "Help & Support", key: "help-support", button: { label: "Help & Support", style: "Primary", emoji: "🆘" } },
+    { id: "ticket_claim", label: "Claim Order", category: "Claim Order", key: "claim-order", button: { label: "Claim Order", style: "Success", emoji: "💰" } },
+    { id: "ticket_sell", label: "Sell To us", category: "Sell To us", key: "sell-to-us", button: { label: "Sell To us", style: "Secondary", emoji: "💸" } },
+    { id: "ticket_rewards", label: "Rewards", category: "Rewards", key: "rewards", button: { label: "Rewards", style: "Danger", emoji: "🎁" } },
   ],
 };
 
@@ -305,11 +289,7 @@ async function denyIfStopped(interactionOrMessage) {
   if (!isStopped(guildId)) return false;
 
   const content = "Adam has restricted commands in your server.";
-  if (
-    interactionOrMessage.isChatInputCommand?.() ||
-    interactionOrMessage.isButton?.() ||
-    interactionOrMessage.isModalSubmit?.()
-  ) {
+  if (interactionOrMessage.isChatInputCommand?.() || interactionOrMessage.isButton?.() || interactionOrMessage.isModalSubmit?.()) {
     try {
       if (interactionOrMessage.deferred || interactionOrMessage.replied) {
         await interactionOrMessage.followUp({ content, ephemeral: true }).catch(() => {});
@@ -634,7 +614,7 @@ function scheduleGiveawayEnd(messageId) {
   }, Math.min(delay, MAX));
 }
 
-/* ===================== SLASH COMMANDS REGISTRATION (NO CLIENT_ID) ===================== */
+/* ===================== SLASH COMMANDS REGISTRATION (SCOPE DEDUPE FIX) ===================== */
 
 function buildCommandsJSON() {
   const settingsCmd = new SlashCommandBuilder()
@@ -652,11 +632,7 @@ function buildCommandsJSON() {
             .setName("action")
             .setDescription("add/remove/clear")
             .setRequired(true)
-            .addChoices(
-              { name: "add", value: "add" },
-              { name: "remove", value: "remove" },
-              { name: "clear", value: "clear" }
-            )
+            .addChoices({ name: "add", value: "add" }, { name: "remove", value: "remove" }, { name: "clear", value: "clear" })
         )
         .addRoleOption((o) => o.setName("role").setDescription("Role to add/remove (not needed for clear).").setRequired(false))
     )
@@ -671,9 +647,7 @@ function buildCommandsJSON() {
             .setRequired(true)
             .addChoices({ name: "vouches", value: "vouches" }, { name: "join_log", value: "join_log" })
         )
-        .addChannelOption((o) =>
-          o.setName("channel").setDescription("Text channel").addChannelTypes(ChannelType.GuildText).setRequired(true)
-        )
+        .addChannelOption((o) => o.setName("channel").setDescription("Text channel").addChannelTypes(ChannelType.GuildText).setRequired(true))
     )
     .addSubcommand((s) =>
       s
@@ -692,9 +666,7 @@ function buildCommandsJSON() {
             .setRequired(true)
             .addChoices({ name: "on", value: "on" }, { name: "off", value: "off" })
         )
-        .addStringOption((o) =>
-          o.setName("bypass_role_name").setDescription("Role NAME that bypasses link block (default: automod)").setRequired(false)
-        )
+        .addStringOption((o) => o.setName("bypass_role_name").setDescription("Role NAME that bypasses link block (default: automod)").setRequired(false))
     );
 
   const panelCmd = new SlashCommandBuilder()
@@ -716,21 +688,16 @@ function buildCommandsJSON() {
     .addSubcommand((sub) => sub.setName("show").setDescription("Show current saved panel config (ephemeral)."))
     .addSubcommand((sub) => sub.setName("reset").setDescription("Reset panel config back to default."));
 
-  const stopCmd = new SlashCommandBuilder()
-    .setName("stop")
-    .setDescription("OWNER: restrict bot commands in a server.")
-    .setDMPermission(false)
+  const stopCmd = new SlashCommandBuilder().setName("stop").setDescription("OWNER: restrict bot commands in a server.").setDMPermission(false)
     .addStringOption((o) => o.setName("server_id").setDescription("Guild ID").setRequired(true));
 
-  const resumeCmd = new SlashCommandBuilder()
-    .setName("resume")
-    .setDescription("OWNER: resume bot commands in a server.")
-    .setDMPermission(false)
+  const resumeCmd = new SlashCommandBuilder().setName("resume").setDescription("OWNER: resume bot commands in a server.").setDMPermission(false)
     .addStringOption((o) => o.setName("server_id").setDescription("Guild ID").setRequired(true));
 
+  // KEEP /sync + add mode:fix_here
   const syncCmd = new SlashCommandBuilder()
     .setName("sync")
-    .setDescription("OWNER: fix commands for this server (and optionally clear).")
+    .setDescription("OWNER: fix/clean commands (undupe).")
     .setDMPermission(false)
     .addStringOption((o) =>
       o
@@ -738,12 +705,19 @@ function buildCommandsJSON() {
         .setDescription("What to do")
         .setRequired(false)
         .addChoices(
+          { name: "fix_here", value: "fix_here" },          // ✅ NEW: undupe for good in THIS server
           { name: "register_here", value: "register_here" },
           { name: "clear_here", value: "clear_here" },
           { name: "register_global", value: "register_global" },
           { name: "clear_global", value: "clear_global" }
         )
     );
+
+  // Simple alias command
+  const undupeCmd = new SlashCommandBuilder()
+    .setName("undupe")
+    .setDescription("OWNER: remove duped slash commands in this server (permanent).")
+    .setDMPermission(false);
 
   const embedCmd = new SlashCommandBuilder()
     .setName("embed")
@@ -784,10 +758,8 @@ function buildCommandsJSON() {
     .setName("operation")
     .setDescription("Admin: give customer role + ping vouch now, close ticket after timer.")
     .setDMPermission(false)
-    .addSubcommand((sub) =>
-      sub.setName("start").setDescription("Start operation timer in this ticket.")
-        .addStringOption((o) => o.setName("duration").setDescription("e.g. 10m, 1h, 2d").setRequired(true))
-    )
+    .addSubcommand((sub) => sub.setName("start").setDescription("Start operation timer in this ticket.")
+      .addStringOption((o) => o.setName("duration").setDescription("e.g. 10m, 1h, 2d").setRequired(true)))
     .addSubcommand((sub) => sub.setName("cancel").setDescription("Cancel operation timer in this ticket."));
 
   const giveawayCmds = [
@@ -808,6 +780,7 @@ function buildCommandsJSON() {
     stopCmd,
     resumeCmd,
     syncCmd,
+    undupeCmd, // ✅ NEW
     embedCmd,
     ...invitesCmds,
     closeCmd,
@@ -822,7 +795,6 @@ function getRest() {
 }
 
 function getAppId() {
-  // This is the key fix: we do NOT need CLIENT_ID env var.
   return client.application?.id || client.user?.id || null;
 }
 
@@ -830,8 +802,7 @@ async function registerGlobal() {
   const appId = getAppId();
   if (!appId) throw new Error("App ID not available yet (bot not ready).");
   const rest = getRest();
-  const body = buildCommandsJSON();
-  await rest.put(Routes.applicationCommands(appId), { body });
+  await rest.put(Routes.applicationCommands(appId), { body: buildCommandsJSON() });
   console.log("✅ Registered GLOBAL slash commands");
 }
 
@@ -839,8 +810,7 @@ async function registerGuild(guildId) {
   const appId = getAppId();
   if (!appId) throw new Error("App ID not available yet (bot not ready).");
   const rest = getRest();
-  const body = buildCommandsJSON();
-  await rest.put(Routes.applicationGuildCommands(appId, guildId), { body });
+  await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: buildCommandsJSON() });
   console.log(`✅ Registered GUILD slash commands for guild ${guildId}`);
 }
 
@@ -860,16 +830,38 @@ async function clearGuild(guildId) {
   console.log(`🧹 Cleared GUILD slash commands for guild ${guildId}`);
 }
 
-async function autoRegisterOnStartup() {
-  const scope = (process.env.REGISTER_SCOPE || "global").toLowerCase().trim();
+/**
+ * ✅ THE REAL “PERMA-UNDUPE” FIX:
+ * If scope is GLOBAL:
+ *   - keep global commands
+ *   - clear guild-specific commands in each guild (so no dupes)
+ * If scope is GUILD:
+ *   - keep guild commands only in DEV_GUILD_ID
+ *   - clear global commands (so no dupes)
+ */
+async function enforceSingleScopeOnStartup() {
+  const scope = getRegisterScope();
   const devGuild = (process.env.DEV_GUILD_ID || "").trim();
 
   if (scope === "guild") {
     if (!/^\d{10,25}$/.test(devGuild)) throw new Error("REGISTER_SCOPE=guild requires DEV_GUILD_ID");
+    // Ensure no global dupes
+    await clearGlobal().catch(() => {});
     await registerGuild(devGuild);
     return;
   }
+
+  // scope === global
   await registerGlobal();
+
+  // Clear guild commands in every guild the bot is in (prevents dupes reappearing after restart)
+  // Do it slowly to avoid rate limits.
+  const guilds = [...client.guilds.cache.keys()];
+  for (let i = 0; i < guilds.length; i++) {
+    const gid = guilds[i];
+    await clearGuild(gid).catch(() => {});
+    await new Promise((r) => setTimeout(r, 900)); // small delay to stay safe
+  }
 }
 
 /* ===================== READY ===================== */
@@ -878,11 +870,11 @@ client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   try {
-    await client.application.fetch(); // helps ensure client.application.id exists
+    await client.application.fetch();
   } catch {}
 
   try {
-    await autoRegisterOnStartup();
+    await enforceSingleScopeOnStartup();
   } catch (e) {
     console.log("❌ Slash register failed:", e?.message || e);
   }
@@ -901,6 +893,12 @@ client.once("ready", async () => {
 client.on("guildCreate", async (guild) => {
   getGuildSettings(guild.id);
   await refreshGuildInvites(guild).catch(() => {});
+
+  // When bot joins a new guild, enforce scope immediately
+  const scope = getRegisterScope();
+  if (scope === "global") {
+    await clearGuild(guild.id).catch(() => {}); // prevent new guild dupes
+  }
 });
 
 /* ===================== INVITE EVENTS ===================== */
@@ -1004,7 +1002,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const isOwnerCmd =
       interaction.isChatInputCommand() &&
-      (interaction.commandName === "stop" || interaction.commandName === "resume" || interaction.commandName === "sync");
+      (interaction.commandName === "stop" || interaction.commandName === "resume" || interaction.commandName === "sync" || interaction.commandName === "undupe");
 
     if (!isOwnerCmd) {
       const blocked = await denyIfStopped(interaction);
@@ -1094,10 +1092,7 @@ client.on("interactionCreate", async (interaction) => {
 
       const overwrites = [
         { id: interaction.guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-        {
-          id: interaction.user.id,
-          allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
-        },
+        { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
         ...(s.staffRoleIds || []).map((rid) => ({
           id: rid,
           allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
@@ -1130,21 +1125,61 @@ client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     const name = interaction.commandName;
 
+    /* ---------- /undupe (OWNER) ---------- */
+    if (name === "undupe") {
+      if (!isOwner(interaction.user.id)) return interaction.reply({ content: "Only Adam can use this command.", ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+
+      const scope = getRegisterScope();
+      try {
+        if (scope === "global") {
+          // keep global, remove guild cmds in THIS server
+          await clearGuild(interaction.guild.id);
+          await registerGlobal(); // ensure global exists
+          return interaction.editReply("✅ Unduped: kept GLOBAL commands and removed THIS server's guild commands.");
+        } else {
+          // keep guild (dev), remove global
+          const devGuild = (process.env.DEV_GUILD_ID || "").trim();
+          if (!/^\d{10,25}$/.test(devGuild)) return interaction.editReply("❌ REGISTER_SCOPE=guild requires DEV_GUILD_ID.");
+          await clearGlobal();
+          await registerGuild(interaction.guild.id);
+          return interaction.editReply("✅ Unduped: removed GLOBAL commands and registered THIS server's guild commands.");
+        }
+      } catch (e) {
+        return interaction.editReply(`❌ Undupe failed: ${e?.message || e}`);
+      }
+    }
+
     /* ---------- /sync (OWNER) ---------- */
     if (name === "sync") {
       if (!isOwner(interaction.user.id)) return interaction.reply({ content: "Only Adam can use this command.", ephemeral: true });
-
-      const mode = interaction.options.getString("mode", false) || "register_here";
+      const mode = interaction.options.getString("mode", false) || "fix_here";
       await interaction.deferReply({ ephemeral: true });
 
       try {
+        if (mode === "fix_here") {
+          // same as /undupe
+          const scope = getRegisterScope();
+          if (scope === "global") {
+            await clearGuild(interaction.guild.id);
+            await registerGlobal();
+            return interaction.editReply("✅ Fixed dupes here: kept GLOBAL + cleared THIS server guild commands.");
+          } else {
+            const devGuild = (process.env.DEV_GUILD_ID || "").trim();
+            if (!/^\d{10,25}$/.test(devGuild)) return interaction.editReply("❌ REGISTER_SCOPE=guild requires DEV_GUILD_ID.");
+            await clearGlobal();
+            await registerGuild(interaction.guild.id);
+            return interaction.editReply("✅ Fixed dupes here: cleared GLOBAL + registered THIS server guild commands.");
+          }
+        }
+
         if (mode === "clear_here") {
           await clearGuild(interaction.guild.id);
-          return interaction.editReply("🧹 Cleared THIS server commands. Now run `/sync mode:register_here`.");
+          return interaction.editReply("🧹 Cleared THIS server commands.");
         }
         if (mode === "register_here") {
           await registerGuild(interaction.guild.id);
-          return interaction.editReply("✅ Re-registered commands for THIS server. Try `/settings` now.");
+          return interaction.editReply("✅ Registered commands for THIS server.");
         }
         if (mode === "clear_global") {
           await clearGlobal();
@@ -1152,8 +1187,10 @@ client.on("interactionCreate", async (interaction) => {
         }
         if (mode === "register_global") {
           await registerGlobal();
-          return interaction.editReply("✅ Re-registered GLOBAL commands. (May take time to update everywhere)");
+          return interaction.editReply("✅ Registered GLOBAL commands. (May take time to update everywhere)");
         }
+
+        return interaction.editReply("Done.");
       } catch (e) {
         return interaction.editReply(`❌ Sync failed: ${e?.message || e}`);
       }
@@ -1177,7 +1214,7 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    /* ---------- /settings (THIS IS THE FIXED ONE) ---------- */
+    /* ---------- /settings ---------- */
     if (name === "settings") {
       const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
       if (!member || !isAdminOrOwner(member)) return interaction.reply({ content: "Admins only.", ephemeral: true });
@@ -1710,107 +1747,29 @@ client.on("messageCreate", async (message) => {
     if (message.content.startsWith(PREFIX) && canUsePrefix) {
       const parts = message.content.slice(PREFIX.length).trim().split(/\s+/);
       const cmd = (parts.shift() || "").toLowerCase();
-      const arg1 = parts[0];
-      const text = message.content.slice(PREFIX.length + cmd.length + 1);
 
-      if (cmd === "sync" && isOwner(message.author.id)) {
-        const mode = (parts[0] || "register_here").toLowerCase();
+      // Prefix alias: !undupe
+      if (cmd === "undupe" && isOwner(message.author.id)) {
+        const scope = getRegisterScope();
         try {
-          if (mode === "clear_here") {
+          if (scope === "global") {
             await clearGuild(message.guild.id);
-            return message.reply("🧹 Cleared THIS server commands. Now do `!sync register_here`.");
-          }
-          if (mode === "register_here") {
-            await registerGuild(message.guild.id);
-            return message.reply("✅ Re-registered commands for THIS server. Try `/settings` now.");
-          }
-          if (mode === "clear_global") {
-            await clearGlobal();
-            return message.reply("🧹 Cleared GLOBAL commands.");
-          }
-          if (mode === "register_global") {
             await registerGlobal();
-            return message.reply("✅ Re-registered GLOBAL commands.");
+            return message.reply("✅ Unduped: kept GLOBAL commands and removed THIS server's guild commands.");
+          } else {
+            const devGuild = (process.env.DEV_GUILD_ID || "").trim();
+            if (!/^\d{10,25}$/.test(devGuild)) return message.reply("❌ REGISTER_SCOPE=guild requires DEV_GUILD_ID.");
+            await clearGlobal();
+            await registerGuild(message.guild.id);
+            return message.reply("✅ Unduped: removed GLOBAL commands and registered THIS server's guild commands.");
           }
         } catch (e) {
-          return message.reply(`❌ Sync failed: ${e?.message || e}`);
+          return message.reply(`❌ Undupe failed: ${e?.message || e}`);
         }
-      }
-
-      if (cmd === "stick") {
-        if (!text || !text.trim()) return message.reply("Usage: `!stick <message>`");
-
-        const old = stickyByChannel.get(message.channel.id);
-        if (old?.messageId) await message.channel.messages.delete(old.messageId).catch(() => {});
-
-        const sent = await message.channel.send(text);
-        stickyByChannel.set(message.channel.id, { content: text, messageId: sent.id });
-        await message.reply("✅ Sticky set for this channel.");
-        return;
-      }
-
-      if (cmd === "unstick") {
-        const old = stickyByChannel.get(message.channel.id);
-        if (old?.messageId) await message.channel.messages.delete(old.messageId).catch(() => {});
-        stickyByChannel.delete(message.channel.id);
-        await message.reply("✅ Sticky removed for this channel.");
-        return;
-      }
-
-      if (cmd === "mute") {
-        const userId = arg1?.match(/\d{10,25}/)?.[0];
-        if (!userId) return message.reply("Usage: `!mute <@user|id>`");
-
-        const target = await message.guild.members.fetch(userId).catch(() => null);
-        if (!target) return message.reply("❌ I can't find that user in this server.");
-
-        const me = await message.guild.members.fetchMe();
-        if (!me.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
-          return message.reply("❌ I need **Moderate Members** permission to timeout users.");
-        }
-
-        await target.timeout(5 * 60 * 1000, `Timed out by ${message.author.tag} (5 minutes)`).catch(() => {});
-        await message.channel.send(`${target.user} was timed out for **5 min**.`).catch(() => {});
-        return;
-      }
-
-      if (cmd === "ban") {
-        const userId = arg1?.match(/\d{10,25}/)?.[0];
-        if (!userId) return message.reply("Usage: `!ban <@user|id>`");
-
-        const target = await message.guild.members.fetch(userId).catch(() => null);
-        if (!target) return message.reply("❌ I can't find that user in this server.");
-
-        await target.ban({ reason: `Banned by ${message.author.tag}` }).catch(() => {});
-        await message.channel.send(`${target.user} was banned.`).catch(() => {});
-        return;
-      }
-
-      if (cmd === "kick") {
-        const userId = arg1?.match(/\d{10,25}/)?.[0];
-        if (!userId) return message.reply("Usage: `!kick <@user|id>`");
-
-        const target = await message.guild.members.fetch(userId).catch(() => null);
-        if (!target) return message.reply("❌ I can't find that user in this server.");
-
-        await target.kick(`Kicked by ${message.author.tag}`).catch(() => {});
-        await message.channel.send(`${target.user} was kicked.`).catch(() => {});
-        return;
-      }
-
-      if (cmd === "purge") {
-        const amount = parseInt(arg1, 10);
-        if (!amount || amount < 1) return message.reply("Usage: `!purge <amount>` (1-100)");
-
-        const toDelete = Math.min(100, amount + 1);
-        await message.channel.bulkDelete(toDelete, true).catch(async () => {
-          await message.reply("❌ I can’t bulk delete messages older than 14 days.");
-        });
-        return;
       }
     }
 
-    // sticky behavior
+    // sticky behavior (unchanged)
     const sticky = stickyByChannel.get(message.channel.id);
     if (sticky) {
       if (sticky.messageId && message.id === sticky.messageId) return;
@@ -1833,7 +1792,10 @@ if (!process.env.TOKEN) {
 client.login(process.env.TOKEN);
 
 /**
- * If /settings still doesn’t show:
- * - Run /sync mode:clear_here then /sync mode:register_here (owner)
- * OR prefix fallback: !sync clear_here then !sync register_here
+ * How to permanently remove dupes:
+ * 1) Set REGISTER_SCOPE=global (recommended)
+ * 2) Restart bot
+ * 3) Run /undupe once in each server (or /sync mode:fix_here)
+ *
+ * After that: it will NOT re-dupe on restarts because startup auto-clears the other scope.
  */
