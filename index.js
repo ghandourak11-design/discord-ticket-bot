@@ -19,7 +19,7 @@
  *   - Staff roles can view tickets
  *
  * ✅ /close:
- *   - Only opener OR staff/admin
+ *   - Only opener OR staff/admin (or OWNER override)
  *   - DMs opener a “real ticket bot” style embed with details
  *   - Deletes ticket after 3 seconds
  *
@@ -37,6 +37,9 @@
  *
  * ✅ Prefix admin commands (Administrator only):
  *   - !stick / !unstick / !mute / !ban / !kick / !purge
+ *
+ * ✅ OWNER OVERRIDE:
+ *   - OWNER_ID can use ANY command in ANY server regardless of roles/permissions.
  *
  * ENV:
  *  TOKEN=...
@@ -73,22 +76,26 @@ const {
 const PREFIX = "!";
 const AUTOMOD_ROLE_NAME = "automod";
 
-/** Your updated IDs */
+/** OWNER (Adam) override */
+const OWNER_ID = "1456326972631154786";
+
+/** Updated IDs */
 const CUSTOMER_ROLE_ID = "1474606828875677858";
 const VOUCHES_CHANNEL_ID = "1474606921305821466";
 
 /** unchanged (edit if needed) */
 const JOIN_LOG_CHANNEL_ID = "1461947323541225704";
 
-// Staff roles that can SEE tickets + /link + giveaways + /close
+/** Staff roles that can SEE tickets + /link + giveaways + /close (UPDATED) */
 const STAFF_ROLE_IDS = [
-  "1465888170531881123",
-  "1457184344538874029",
-  "1456504229148758229",
-  "1464012365472337990",
+  "1474606819447144621",
+  "1474606820789194916",
+  "1474606822500597871",
+  "1474606823343657103",
+  "1474606824131924118",
 ];
 
-// ONLY these roles can /resetinvites (admins do NOT bypass unless also staff)
+/** ONLY these roles can /resetinvites (admins do NOT bypass unless also staff) */
 const RESETINVITES_ROLE_IDS = [...STAFF_ROLE_IDS];
 
 /* ===================== DEFAULT PANEL CONFIG ===================== */
@@ -163,10 +170,10 @@ function saveJson(file, data) {
 }
 
 const invitesData = loadJson(INVITES_FILE, {
-  inviterStats: {}, // inviterId -> { joins, rejoins, left, manual }
-  memberInviter: {}, // memberId -> creditedInviterId
-  inviteOwners: {}, // inviteCode -> userId (custom credit owner)
-  invitedMembers: {}, // inviterId -> { memberId: { inviteCode, joinedAt, active, leftAt } }
+  inviterStats: {},
+  memberInviter: {},
+  inviteOwners: {},
+  invitedMembers: {},
 });
 invitesData.inviterStats ??= {};
 invitesData.memberInviter ??= {};
@@ -206,6 +213,10 @@ const client = new Client({
 });
 
 /* ===================== HELPERS ===================== */
+
+function isOwner(userId) {
+  return String(userId) === OWNER_ID;
+}
 
 function cleanName(str) {
   return (str || "")
@@ -264,8 +275,10 @@ function memberHasAnyRole(member, roleIds) {
   return roleIds.some((rid) => member.roles.cache.has(rid));
 }
 
+/** STAFF CHECK (OWNER OVERRIDE) */
 function isStaff(member) {
   if (!member) return false;
+  if (isOwner(member.id)) return true;
   if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
   return memberHasAnyRole(member, STAFF_ROLE_IDS);
 }
@@ -717,7 +730,6 @@ async function registerSlashCommandsGlobal() {
 
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
-  // ✅ GLOBAL registration (works everywhere)
   await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
   console.log("✅ GLOBAL slash commands registered (may take some time to appear everywhere)");
 }
@@ -734,12 +746,8 @@ client.once("ready", async () => {
   }
 
   for (const guild of client.guilds.cache.values()) {
-    try {
-      await ensureAutoModRole(guild);
-    } catch {}
-    try {
-      await refreshGuildInvites(guild);
-    } catch {}
+    try { await ensureAutoModRole(guild); } catch {}
+    try { await refreshGuildInvites(guild); } catch {}
   }
 
   for (const messageId of Object.keys(giveawayData.giveaways || {})) {
@@ -750,26 +758,14 @@ client.once("ready", async () => {
 
 // when bot joins a new server
 client.on("guildCreate", async (guild) => {
-  try {
-    await ensureAutoModRole(guild);
-  } catch {}
-  try {
-    await refreshGuildInvites(guild);
-  } catch {}
+  try { await ensureAutoModRole(guild); } catch {}
+  try { await refreshGuildInvites(guild); } catch {}
 });
 
 /* ===================== INVITE EVENTS + JOIN/LEAVE ===================== */
 
-client.on("inviteCreate", async (invite) => {
-  try {
-    await refreshGuildInvites(invite.guild);
-  } catch {}
-});
-client.on("inviteDelete", async (invite) => {
-  try {
-    await refreshGuildInvites(invite.guild);
-  } catch {}
-});
+client.on("inviteCreate", async (invite) => { try { await refreshGuildInvites(invite.guild); } catch {} });
+client.on("inviteDelete", async (invite) => { try { await refreshGuildInvites(invite.guild); } catch {} });
 
 client.on("guildMemberAdd", async (member) => {
   try {
@@ -789,10 +785,7 @@ client.on("guildMemberAdd", async (member) => {
     for (const inv of invites.values()) {
       const prev = before.get(inv.code) ?? 0;
       const now = inv.uses ?? 0;
-      if (now > prev) {
-        used = inv;
-        break;
-      }
+      if (now > prev) { used = inv; break; }
     }
 
     const after = new Map();
@@ -978,7 +971,9 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /panel ---------- */
       if (name === "panel") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Admins only.", ephemeral: true });
+        if (!isOwner(interaction.user.id) && !member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({ content: "Admins only.", ephemeral: true });
+        }
 
         const sub = interaction.options.getSubcommand();
 
@@ -1000,11 +995,7 @@ client.on("interactionCreate", async (interaction) => {
           if (raw.length > 6000) return interaction.reply({ content: "❌ JSON too long. Keep it under ~6000 chars.", ephemeral: true });
 
           let cfg;
-          try {
-            cfg = JSON.parse(raw);
-          } catch {
-            return interaction.reply({ content: "❌ Invalid JSON.", ephemeral: true });
-          }
+          try { cfg = JSON.parse(raw); } catch { return interaction.reply({ content: "❌ Invalid JSON.", ephemeral: true }); }
 
           const v = validatePanelConfig(cfg);
           if (!v.ok) return interaction.reply({ content: `❌ ${v.msg}`, ephemeral: true });
@@ -1030,7 +1021,9 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /embed ---------- */
       if (name === "embed") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Only administrators can use /embed.", ephemeral: true });
+        if (!isOwner(interaction.user.id) && !member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({ content: "Only administrators can use /embed.", ephemeral: true });
+        }
 
         const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
         if (!targetChannel || targetChannel.type !== ChannelType.GuildText) return interaction.reply({ content: "Invalid channel.", ephemeral: true });
@@ -1117,7 +1110,10 @@ client.on("interactionCreate", async (interaction) => {
 
       /* ---------- /addinvites ---------- */
       if (name === "addinvites") {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        if (!isOwner(interaction.user.id) && !member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
+        }
         const user = interaction.options.getUser("user", true);
         const amount = interaction.options.getInteger("amount", true);
 
@@ -1130,7 +1126,7 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /resetinvites ---------- */
       if (name === "resetinvites") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        const allowed = memberHasAnyRole(member, RESETINVITES_ROLE_IDS);
+        const allowed = isOwner(interaction.user.id) || memberHasAnyRole(member, RESETINVITES_ROLE_IDS);
         if (!allowed) return interaction.reply({ content: "You don't have permission to use this.", ephemeral: true });
 
         const user = interaction.options.getUser("user", true);
@@ -1143,7 +1139,9 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /resetall ---------- */
       if (name === "resetall") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
+        if (!isOwner(interaction.user.id) && !member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({ content: "Only administrators can use this.", ephemeral: true });
+        }
 
         invitesData.inviterStats = {};
         invitesData.memberInviter = {};
@@ -1169,7 +1167,7 @@ client.on("interactionCreate", async (interaction) => {
 
         const member = await interaction.guild.members.fetch(interaction.user.id);
         const isOpener = interaction.user.id === openerId;
-        const canClose = isOpener || isStaff(member);
+        const canClose = isOwner(interaction.user.id) || isOpener || isStaff(member);
         if (!canClose) return interaction.reply({ content: "Only the opener or staff can close this.", ephemeral: true });
 
         if (activeOperations.has(channel.id)) {
@@ -1201,7 +1199,7 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /link ---------- */
       if (name === "link") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+        if (!isOwner(interaction.user.id) && !isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
 
         const target = interaction.options.getUser("user", true);
 
@@ -1242,7 +1240,9 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /operation ---------- */
       if (name === "operation") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) return interaction.reply({ content: "Admins only.", ephemeral: true });
+        if (!isOwner(interaction.user.id) && !member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({ content: "Admins only.", ephemeral: true });
+        }
 
         if (!isTicketChannel(interaction.channel)) return interaction.reply({ content: "Use /operation inside a ticket channel.", ephemeral: true });
 
@@ -1296,7 +1296,7 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /giveaway ---------- */
       if (name === "giveaway") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+        if (!isOwner(interaction.user.id) && !isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
 
         const durationStr = interaction.options.getString("duration", true);
         const winners = interaction.options.getInteger("winners", true);
@@ -1340,7 +1340,7 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /end ---------- */
       if (name === "end") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+        if (!isOwner(interaction.user.id) && !isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
 
         const raw = interaction.options.getString("message", true);
         const messageId = extractMessageId(raw);
@@ -1354,7 +1354,7 @@ client.on("interactionCreate", async (interaction) => {
       /* ---------- /reroll ---------- */
       if (name === "reroll") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        if (!isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+        if (!isOwner(interaction.user.id) && !isStaff(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
 
         const raw = interaction.options.getString("message", true);
         const messageId = extractMessageId(raw);
@@ -1381,8 +1381,8 @@ client.on("messageCreate", async (message) => {
   try {
     if (!message.guild || message.author.bot) return;
 
-    // automod link blocker
-    if (containsLink(message.content)) {
+    // automod link blocker (OWNER BYPASS)
+    if (containsLink(message.content) && !isOwner(message.author.id)) {
       const member = message.member;
       if (member) {
         const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
@@ -1400,9 +1400,9 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    // Admin-only ! commands
+    // Admin-only ! commands (OWNER OVERRIDE)
     if (message.content.startsWith(PREFIX)) {
-      if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+      if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
       const parts = message.content.slice(PREFIX.length).trim().split(/\s+/);
       const cmd = (parts.shift() || "").toLowerCase();
@@ -1509,4 +1509,5 @@ client.login(process.env.TOKEN);
  * When you invite the bot, include scopes:
  * ✅ bot
  * ✅ applications.commands
- */
+ */ ```
+::contentReference[oaicite:0]{index=0}
