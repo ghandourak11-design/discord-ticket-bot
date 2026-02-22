@@ -1,50 +1,17 @@
 /**
- * DonutDemand Bot — Full
+ * DonutDemand Bot — Full (Rewritten)
  *
- * ✅ GLOBAL slash commands (work in EVERY server your bot is in)
- * ✅ Adam-only /stop <server_id> + /resume <server_id> (hard disables bot per server)
- *    - When disabled: any interaction/prefix command gets PUBLIC message:
- *      "Adam has restricted commands in your server."
- *
- * ✅ /panel (ADMIN only) — configure + post ticket panel per-server (JSON config)
- *    /panel set <json>
- *    /panel post [channel]
- *    /panel show
- *    /panel reset
- *
- * ✅ Tickets:
- *   - Button -> Modal (MC username + What do you need?)
- *   - Auto-create 1 category per ticket type
- *   - 1 open ticket per user
- *   - Staff roles can view tickets
- *   - /close: opener or staff/admin
- *     - DMs opener a detailed embed
- *     - deletes ticket after 3 seconds
- *
- * ✅ Invites (persistent JSON):
- *   - Tracks joins / rejoins / leaves / manual
- *   - /invites, /generate, /linkinvite, /link, /addinvites, /resetinvites, /resetall
- *
- * ✅ Automod:
- *   - Blocks links unless Admin OR has role named "automod" (auto-created if possible)
- *
- * ✅ Giveaways:
- *   - /giveaway, /end, /reroll with join button
- *
- * ✅ Prefix admin commands (Administrator only):
- *   - !stick / !unstick / !mute / !ban / !kick / !purge
+ * ✅ GLOBAL slash commands (show in every server by default)
+ * ✅ /stop + /resume are visible to everyone, but ONLY OWNER_ID can run them
+ * ✅ If a guild is stopped: bot blocks all commands + replies "Adam has restricted commands in your server."
+ * ✅ /panel set|post|show|reset (ADMIN only) — per-guild JSON config
+ * ✅ Tickets (buttons + modal questions), ticket channel creation, /close DMs opener embed
+ * ✅ Invites tracking (persistent JSON)
+ * ✅ Automod link blocker (bypass via "automod" role or admin)
+ * ✅ Giveaways with Join/Leave button + auto end + reroll/end commands
  *
  * ENV:
  *  TOKEN=...
- *
- * Dev Portal Intents:
- *  - Server Members Intent
- *  - Message Content Intent
- *
- * NOTE:
- *  Invite bot with scopes:
- *   ✅ bot
- *   ✅ applications.commands
  */
 
 require("dotenv").config();
@@ -71,17 +38,17 @@ const {
 
 /* ===================== CONFIG ===================== */
 
-const PREFIX = "!";
 const AUTOMOD_ROLE_NAME = "automod";
 
-/** Adam-only owner lock */
+/** Bot owner (Adam) */
 const OWNER_ID = "1456326972631154786";
+const ONLY_OWNER_MESSAGE = "Only Adam can use this command.";
 const RESTRICT_MESSAGE = "Adam has restricted commands in your server.";
 
-/** Updated IDs */
+/** Updated IDs (your server IDs for embeds/links) */
 const CUSTOMER_ROLE_ID = "1474606828875677858";
 const VOUCHES_CHANNEL_ID = "1474606921305821466";
-const WELCOME_CHANNEL_ID = "1474606890842329169"; // ✅ NEW welcome channel id
+const WELCOME_CHANNEL_ID = "1474606890842329169";
 
 /** Staff roles */
 const STAFF_ROLE_IDS = [
@@ -91,7 +58,6 @@ const STAFF_ROLE_IDS = [
   "1464012365472337990",
 ];
 
-/** ONLY these roles can /resetinvites (admins do NOT bypass unless also staff) */
 const RESETINVITES_ROLE_IDS = [...STAFF_ROLE_IDS];
 
 /* ===================== DEFAULT PANEL CONFIG ===================== */
@@ -112,34 +78,10 @@ const DEFAULT_PANEL_CONFIG = {
     needLabel: "What do you need?",
   },
   tickets: [
-    {
-      id: "ticket_support",
-      label: "Help & Support",
-      category: "Help & Support",
-      key: "help-support",
-      button: { label: "Help & Support", style: "Primary", emoji: "🆘" },
-    },
-    {
-      id: "ticket_claim",
-      label: "Claim Order",
-      category: "Claim Order",
-      key: "claim-order",
-      button: { label: "Claim Order", style: "Success", emoji: "💰" },
-    },
-    {
-      id: "ticket_sell",
-      label: "Sell To us",
-      category: "Sell To us",
-      key: "sell-to-us",
-      button: { label: "Sell To us", style: "Secondary", emoji: "💸" },
-    },
-    {
-      id: "ticket_rewards",
-      label: "Rewards",
-      category: "Rewards",
-      key: "rewards",
-      button: { label: "Rewards", style: "Danger", emoji: "🎁" },
-    },
+    { id: "ticket_support", label: "Help & Support", category: "Help & Support", key: "help-support", button: { label: "Help & Support", style: "Primary", emoji: "🆘" } },
+    { id: "ticket_claim", label: "Claim Order", category: "Claim Order", key: "claim-order", button: { label: "Claim Order", style: "Success", emoji: "💰" } },
+    { id: "ticket_sell", label: "Sell To us", category: "Sell To us", key: "sell-to-us", button: { label: "Sell To us", style: "Secondary", emoji: "💸" } },
+    { id: "ticket_rewards", label: "Rewards", category: "Rewards", key: "rewards", button: { label: "Rewards", style: "Danger", emoji: "🎁" } },
   ],
 };
 
@@ -169,51 +111,37 @@ function saveJson(file, data) {
 
 /** Invites data */
 const invitesData = loadJson(INVITES_FILE, {
-  inviterStats: {}, // inviterId -> { joins, rejoins, left, manual }
-  memberInviter: {}, // memberId -> creditedInviterId
-  inviteOwners: {}, // inviteCode -> userId (custom credit owner)
-  invitedMembers: {}, // inviterId -> { memberId: { inviteCode, joinedAt, active, leftAt } }
+  inviterStats: {},
+  memberInviter: {},
+  inviteOwners: {},
+  invitedMembers: {},
 });
 invitesData.inviterStats ??= {};
 invitesData.memberInviter ??= {};
 invitesData.inviteOwners ??= {};
 invitesData.invitedMembers ??= {};
 saveJson(INVITES_FILE, invitesData);
-
-function saveInvites() {
-  saveJson(INVITES_FILE, invitesData);
-}
+function saveInvites() { saveJson(INVITES_FILE, invitesData); }
 
 /** Giveaways data */
 const giveawayData = loadJson(GIVEAWAYS_FILE, { giveaways: {} });
 giveawayData.giveaways ??= {};
 saveJson(GIVEAWAYS_FILE, giveawayData);
-
-function saveGiveaways() {
-  saveJson(GIVEAWAYS_FILE, giveawayData);
-}
+function saveGiveaways() { saveJson(GIVEAWAYS_FILE, giveawayData); }
 
 /** Panel config per guild */
 const panelStore = loadJson(PANEL_FILE, { byGuild: {} });
 panelStore.byGuild ??= {};
 saveJson(PANEL_FILE, panelStore);
-
-function savePanelStore() {
-  saveJson(PANEL_FILE, panelStore);
-}
+function savePanelStore() { saveJson(PANEL_FILE, panelStore); }
+function getPanelConfig(guildId) { return panelStore.byGuild[guildId] || DEFAULT_PANEL_CONFIG; }
 
 /** Restrictions per guild */
 const restrictionsData = loadJson(RESTRICTIONS_FILE, { blockedGuilds: {} });
-// blockedGuilds: { [guildId]: { blockedAt: number, blockedBy: string } }
 restrictionsData.blockedGuilds ??= {};
 saveJson(RESTRICTIONS_FILE, restrictionsData);
-
-function saveRestrictions() {
-  saveJson(RESTRICTIONS_FILE, restrictionsData);
-}
-function isGuildBlocked(guildId) {
-  return Boolean(restrictionsData.blockedGuilds?.[guildId]);
-}
+function saveRestrictions() { saveJson(RESTRICTIONS_FILE, restrictionsData); }
+function isGuildBlocked(guildId) { return Boolean(restrictionsData.blockedGuilds?.[guildId]); }
 
 /* ===================== CLIENT ===================== */
 
@@ -228,6 +156,37 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+/* ===================== SAFE ACK HELPERS (fixes "did not respond") ===================== */
+
+async function safeDeferReply(interaction, opts = {}) {
+  try {
+    if (!interaction.isRepliable()) return false;
+    if (interaction.deferred || interaction.replied) return true;
+    await interaction.deferReply(opts);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function safeReply(interaction, payload) {
+  try {
+    if (!interaction.isRepliable()) return;
+    if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
+    return await interaction.reply(payload);
+  } catch {}
+}
+
+async function safeDeferUpdate(interaction) {
+  try {
+    if (interaction.deferred || interaction.replied) return true;
+    await interaction.deferUpdate();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /* ===================== HELPERS ===================== */
 
 function cleanName(str) {
@@ -239,39 +198,11 @@ function cleanName(str) {
     .slice(0, 24);
 }
 
-function parseUserId(arg) {
-  if (!arg) return null;
-  const mention = String(arg).match(/^<@!?(\d{10,25})>$/);
-  if (mention) return mention[1];
-  const id = String(arg).match(/^(\d{10,25})$/);
-  if (id) return id[1];
-  return null;
-}
-
 function containsLink(content) {
   if (!content) return false;
   const urlRegex = /(https?:\/\/\S+)|(www\.\S+)/i;
   const inviteRegex = /(discord\.gg\/\S+)|(discord\.com\/invite\/\S+)/i;
   return urlRegex.test(content) || inviteRegex.test(content);
-}
-
-function extractInviteCode(input) {
-  if (!input) return null;
-  return String(input)
-    .trim()
-    .replace(/^https?:\/\/(www\.)?(discord\.gg|discord\.com\/invite)\//i, "")
-    .replace(/[\s/]+/g, "")
-    .slice(0, 64);
-}
-
-function extractMessageId(input) {
-  if (!input) return null;
-  const s = String(input).trim();
-  const m1 = s.match(/\/(\d{10,25})$/);
-  if (m1) return m1[1];
-  const m2 = s.match(/^(\d{10,25})$/);
-  if (m2) return m2[1];
-  return null;
 }
 
 function parseHexColor(input) {
@@ -281,6 +212,15 @@ function parseHexColor(input) {
   if (s.startsWith("0x")) s = s.slice(2);
   if (!/^[0-9a-fA-F]{6}$/.test(s)) return null;
   return parseInt(s, 16);
+}
+
+function normalizeButtonStyle(style) {
+  const s = String(style || "").toLowerCase();
+  if (s === "primary") return ButtonStyle.Primary;
+  if (s === "secondary") return ButtonStyle.Secondary;
+  if (s === "success") return ButtonStyle.Success;
+  if (s === "danger") return ButtonStyle.Danger;
+  return ButtonStyle.Primary;
 }
 
 function memberHasAnyRole(member, roleIds) {
@@ -318,10 +258,7 @@ function ensureInviterStats(inviterId) {
     invitesData.inviterStats[inviterId] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
   } else {
     const s = invitesData.inviterStats[inviterId];
-    s.joins ??= 0;
-    s.rejoins ??= 0;
-    s.left ??= 0;
-    s.manual ??= 0;
+    s.joins ??= 0; s.rejoins ??= 0; s.left ??= 0; s.manual ??= 0;
   }
   return invitesData.inviterStats[inviterId];
 }
@@ -337,27 +274,16 @@ function invitesStillInServer(inviterId) {
 const invitesCache = new Map(); // guildId -> Map(code->uses)
 
 async function refreshGuildInvites(guild) {
-  const invites = await guild.invites.fetch();
+  const invites = await guild.invites.fetch().catch(() => null);
+  if (!invites) return null;
+
   const map = new Map();
   invites.forEach((inv) => map.set(inv.code, inv.uses ?? 0));
   invitesCache.set(guild.id, map);
   return invites;
 }
 
-/* ===================== PANEL CONFIG ===================== */
-
-function getPanelConfig(guildId) {
-  return panelStore.byGuild[guildId] || DEFAULT_PANEL_CONFIG;
-}
-
-function normalizeButtonStyle(style) {
-  const s = String(style || "").toLowerCase();
-  if (s === "primary") return ButtonStyle.Primary;
-  if (s === "secondary") return ButtonStyle.Secondary;
-  if (s === "success") return ButtonStyle.Success;
-  if (s === "danger") return ButtonStyle.Danger;
-  return ButtonStyle.Primary;
-}
+/* ===================== PANEL VALIDATION/BUILD ===================== */
 
 function validatePanelConfig(cfg) {
   if (!cfg || typeof cfg !== "object") return { ok: false, msg: "Config must be a JSON object." };
@@ -367,7 +293,7 @@ function validatePanelConfig(cfg) {
   const tickets = Array.isArray(cfg.tickets) ? cfg.tickets : null;
 
   if (!tickets || tickets.length < 1) return { ok: false, msg: "Config must include tickets: [...] with at least 1 type." };
-  if (tickets.length > 4) return { ok: false, msg: "Max 4 ticket types (fits in one button row)." };
+  if (tickets.length > 5) return { ok: false, msg: "Max 5 ticket types (Discord component rows limit)." };
 
   const title = String(embed.title ?? "").trim();
   const desc = String(embed.description ?? "").trim();
@@ -423,8 +349,9 @@ function buildTicketPanelMessage(config) {
     .setDescription(String(config.embed?.description || "Open a ticket below.").slice(0, 4000))
     .setColor(c);
 
+  // Discord supports max 5 buttons per row, 5 rows. We’ll do 1 row if <=5.
   const row = new ActionRowBuilder();
-  for (const t of config.tickets) {
+  for (const t of config.tickets.slice(0, 5)) {
     const b = t.button || {};
     const btn = new ButtonBuilder()
       .setCustomId(`ticket:${t.id}`)
@@ -445,7 +372,7 @@ async function getOrCreateCategory(guild, name) {
   return cat;
 }
 
-/** Topic format: opener:<id>;created:<unixMs>;type:<ticketId> */
+/** Topic: opener:<id>;created:<ms>;type:<ticketId> */
 function getTicketMetaFromTopic(topic) {
   if (!topic) return null;
   const opener = topic.match(/opener:(\d{10,25})/i)?.[1] || null;
@@ -488,21 +415,16 @@ function buildCloseDmEmbed({ guild, ticketChannelName, ticketTypeLabel, openedAt
       { name: "Opened", value: openedUnix ? `<t:${openedUnix}:F> (<t:${openedUnix}:R>)` : "Unknown", inline: true },
       { name: "Closed", value: `<t:${closedUnix}:F> (<t:${closedUnix}:R>)`, inline: true },
       {
-        name: "Welcome / Info",
+        name: "Useful Links",
         value:
-          `• Welcome channel: <#${WELCOME_CHANNEL_ID}>\n` +
-          `• Leave a vouch in <#${VOUCHES_CHANNEL_ID}>\n` +
-          `• If you still need help, open a new ticket from the panel.`,
+          `• Welcome: <#${WELCOME_CHANNEL_ID}>\n` +
+          `• Vouches: <#${VOUCHES_CHANNEL_ID}>\n` +
+          `• Need more help? Open a new ticket from the panel.`,
         inline: false,
       }
     )
     .setFooter({ text: "DonutDemand Support" });
 }
-
-/* ===================== STICKY + OPERATION TIMERS ===================== */
-
-const stickyByChannel = new Map(); // channelId -> { content, messageId }
-const activeOperations = new Map(); // channelId -> timeout handle
 
 /* ===================== GIVEAWAYS ===================== */
 
@@ -545,11 +467,11 @@ function makeGiveawayEmbed(gw) {
     .setColor(0xed4245)
     .setDescription(
       `Ends: <t:${endUnix}:R> (<t:${endUnix}:F>)\n` +
-        `Hosted by: <@${gw.hostId}>\n` +
-        `Entries: **${gw.entries.length}**\n` +
-        `Winners: **${gw.winners}**` +
-        minInv +
-        status
+      `Hosted by: <@${gw.hostId}>\n` +
+      `Entries: **${gw.entries.length}**\n` +
+      `Winners: **${gw.winners}**` +
+      minInv +
+      status
     )
     .setFooter({ text: `Giveaway Message ID: ${gw.messageId}` });
 }
@@ -622,7 +544,7 @@ function scheduleGiveawayEnd(messageId) {
   const delay = gw.endsAt - Date.now();
   if (delay <= 0) return endGiveaway(messageId).catch(() => {});
 
-  const MAX = 2_147_483_647;
+  const MAX = 2_147_483_647; // setTimeout max
   setTimeout(() => {
     const g = giveawayData.giveaways[messageId];
     if (!g || g.ended) return;
@@ -631,131 +553,104 @@ function scheduleGiveawayEnd(messageId) {
   }, Math.min(delay, MAX));
 }
 
-/* ===================== SLASH COMMAND REGISTRATION (GLOBAL) ===================== */
+/* ===================== COMMAND REGISTRATION (GLOBAL, visible to everyone) ===================== */
 
 async function registerSlashCommandsGlobal() {
   if (!process.env.TOKEN) throw new Error("Missing TOKEN");
 
+  // IMPORTANT:
+  // - We DO NOT set default_member_permissions, so Discord shows them to everyone by default.
+  // - Server admins can still disable commands in Integrations; that cannot be overridden.
+
   const stopCmd = new SlashCommandBuilder()
     .setName("stop")
     .setDescription("Owner only: disable the bot in a server.")
+    .setDMPermission(false)
     .addStringOption((o) => o.setName("server_id").setDescription("Guild/Server ID").setRequired(true));
 
   const resumeCmd = new SlashCommandBuilder()
     .setName("resume")
     .setDescription("Owner only: re-enable the bot in a server.")
+    .setDMPermission(false)
     .addStringOption((o) => o.setName("server_id").setDescription("Guild/Server ID").setRequired(true));
-
-  const embedCmd = new SlashCommandBuilder()
-    .setName("embed")
-    .setDescription("Send a custom embed (admin only).")
-    .addChannelOption((o) =>
-      o.setName("channel").setDescription("Channel to send embed in (optional)").addChannelTypes(ChannelType.GuildText).setRequired(false)
-    )
-    .addStringOption((o) => o.setName("title").setDescription("Embed title").setRequired(false))
-    .addStringOption((o) => o.setName("description").setDescription("Embed description").setRequired(false))
-    .addStringOption((o) => o.setName("color").setDescription("Hex color like #ff0000").setRequired(false))
-    .addStringOption((o) => o.setName("url").setDescription("Clickable title URL").setRequired(false))
-    .addStringOption((o) => o.setName("thumbnail").setDescription("Thumbnail image URL").setRequired(false))
-    .addStringOption((o) => o.setName("image").setDescription("Main image URL").setRequired(false));
 
   const panelCmd = new SlashCommandBuilder()
     .setName("panel")
     .setDescription("Admin: configure and post the ticket panel.")
+    .setDMPermission(false)
     .addSubcommand((sub) =>
-      sub
-        .setName("set")
-        .setDescription("Save ticket panel config JSON for this server.")
+      sub.setName("set").setDescription("Save ticket panel config JSON for this server.")
         .addStringOption((o) => o.setName("json").setDescription("Panel config JSON.").setRequired(true))
     )
     .addSubcommand((sub) =>
-      sub
-        .setName("post")
-        .setDescription("Post the ticket panel using saved config.")
-        .addChannelOption((o) => o.setName("channel").setDescription("Channel to post in (optional)").addChannelTypes(ChannelType.GuildText).setRequired(false))
+      sub.setName("post").setDescription("Post the ticket panel using saved config.")
+        .addChannelOption((o) =>
+          o.setName("channel")
+            .setDescription("Channel to post in (optional)")
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(false)
+        )
     )
     .addSubcommand((sub) => sub.setName("show").setDescription("Show current saved panel config (ephemeral)."))
     .addSubcommand((sub) => sub.setName("reset").setDescription("Reset panel config back to default."));
 
+  const closeCmd = new SlashCommandBuilder()
+    .setName("close")
+    .setDescription("Close the current ticket (DMs opener the reason).")
+    .setDMPermission(false)
+    .addStringOption((o) => o.setName("reason").setDescription("Reason").setRequired(true));
+
+  const vouchesCmd = new SlashCommandBuilder()
+    .setName("vouches")
+    .setDescription("Shows how many vouches this server has.")
+    .setDMPermission(false);
+
+  const giveawayCmd = new SlashCommandBuilder()
+    .setName("giveaway")
+    .setDescription("Start a giveaway with a join button.")
+    .setDMPermission(false)
+    .addStringOption((o) => o.setName("duration").setDescription("e.g. 30m 1h 2d").setRequired(true))
+    .addIntegerOption((o) => o.setName("winners").setDescription("How many winners").setMinValue(1).setRequired(true))
+    .addStringOption((o) => o.setName("prize").setDescription("Prize").setRequired(true))
+    .addIntegerOption((o) => o.setName("min_invites").setDescription("Minimum invites needed to join (optional)").setMinValue(0).setRequired(false));
+
+  const giveawayEndCmd = new SlashCommandBuilder()
+    .setName("giveaway_end")
+    .setDescription("End a giveaway early by message ID.")
+    .setDMPermission(false)
+    .addStringOption((o) => o.setName("message_id").setDescription("Giveaway message ID").setRequired(true));
+
+  const giveawayRerollCmd = new SlashCommandBuilder()
+    .setName("giveaway_reroll")
+    .setDescription("Reroll winners by giveaway message ID.")
+    .setDMPermission(false)
+    .addStringOption((o) => o.setName("message_id").setDescription("Giveaway message ID").setRequired(true));
+
   const commands = [
-    stopCmd,
-    resumeCmd,
-    embedCmd,
+    stopCmd, resumeCmd,
     panelCmd,
-
-    new SlashCommandBuilder()
-      .setName("link")
-      .setDescription("Staff/Admin: show who a user invited + invite links they use.")
-      .addUserOption((o) => o.setName("user").setDescription("User to inspect").setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName("operation")
-      .setDescription("Admin: give customer role + ping vouch now, close ticket after timer.")
-      .addSubcommand((sub) =>
-        sub.setName("start").setDescription("Start operation timer in this ticket.").addStringOption((o) => o.setName("duration").setDescription("e.g. 10m, 1h, 2d").setRequired(true))
-      )
-      .addSubcommand((sub) => sub.setName("cancel").setDescription("Cancel operation timer in this ticket.")),
-
-    new SlashCommandBuilder().setName("vouches").setDescription("Shows how many vouches this server has."),
-
-    new SlashCommandBuilder()
-      .setName("invites")
-      .setDescription("Shows invites still in the server for a user.")
-      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true)),
-
-    new SlashCommandBuilder().setName("generate").setDescription("Generate your personal invite link (credited to you)."),
-
-    new SlashCommandBuilder()
-      .setName("linkinvite")
-      .setDescription("Link an existing invite code to yourself for invite credit.")
-      .addStringOption((o) => o.setName("code").setDescription("Invite code or discord.gg link").setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName("addinvites")
-      .setDescription("Add invites to a user (manual). Admin only.")
-      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true))
-      .addIntegerOption((o) => o.setName("amount").setDescription("Amount").setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName("resetinvites")
-      .setDescription("Reset a user's invite stats. Role-locked.")
-      .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true)),
-
-    new SlashCommandBuilder().setName("resetall").setDescription("Reset invite stats for EVERYONE. Admin only."),
-
-    new SlashCommandBuilder()
-      .setName("close")
-      .setDescription("Close the current ticket (DMs opener the reason).")
-      .addStringOption((o) => o.setName("reason").setDescription("Reason").setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName("giveaway")
-      .setDescription("Start a giveaway with a join button.")
-      .addStringOption((o) => o.setName("duration").setDescription("e.g. 30m 1h 2d").setRequired(true))
-      .addIntegerOption((o) => o.setName("winners").setDescription("How many winners").setRequired(true))
-      .addStringOption((o) => o.setName("prize").setDescription("Prize").setRequired(true))
-      .addIntegerOption((o) => o.setName("min_invites").setDescription("Minimum invites needed to join (optional)").setMinValue(0).setRequired(false)),
-
-    new SlashCommandBuilder()
-      .setName("end")
-      .setDescription("End a giveaway early (staff/admin).")
-      .addStringOption((o) => o.setName("message").setDescription("Giveaway message ID or link").setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName("reroll")
-      .setDescription("Reroll winners for a giveaway (staff/admin).")
-      .addStringOption((o) => o.setName("message").setDescription("Giveaway message ID or link").setRequired(true)),
+    closeCmd,
+    vouchesCmd,
+    giveawayCmd,
+    giveawayEndCmd,
+    giveawayRerollCmd,
   ].map((c) => c.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
-  await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-  console.log("✅ GLOBAL slash commands registered");
+  const appId = client.application?.id || client.user?.id;
+  if (!appId) throw new Error("Application ID not ready.");
+
+  await rest.put(Routes.applicationCommands(appId), { body: commands });
+  console.log("✅ GLOBAL slash commands registered (visible to everyone by default)");
 }
 
 /* ===================== READY ===================== */
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+
+  // Ensure application is ready (v14 sometimes needs fetch)
+  await client.application.fetch().catch(() => {});
 
   try {
     await registerSlashCommandsGlobal();
@@ -768,279 +663,506 @@ client.once("ready", async () => {
     try { await refreshGuildInvites(guild); } catch {}
   }
 
-  for (const messageId of Object.keys(giveawayData.giveaways || {})) {
-    const gw = giveawayData.giveaways[messageId];
-    if (gw && !gw.ended) scheduleGiveawayEnd(messageId);
+  // Reschedule giveaways
+  for (const mid of Object.keys(giveawayData.giveaways)) {
+    const gw = giveawayData.giveaways[mid];
+    if (gw && !gw.ended) scheduleGiveawayEnd(mid);
   }
 });
+
+/* ===================== INVITE TRACKING EVENTS ===================== */
 
 client.on("guildCreate", async (guild) => {
   try { await ensureAutoModRole(guild); } catch {}
   try { await refreshGuildInvites(guild); } catch {}
 });
 
+client.on("inviteCreate", async (invite) => {
+  try {
+    invitesData.inviteOwners[invite.code] = invite.inviter?.id || null;
+    saveInvites();
+    await refreshGuildInvites(invite.guild);
+  } catch {}
+});
+
+client.on("inviteDelete", async (invite) => {
+  try {
+    await refreshGuildInvites(invite.guild);
+  } catch {}
+});
+
+client.on("guildMemberAdd", async (member) => {
+  try {
+    const guild = member.guild;
+    const before = invitesCache.get(guild.id) || new Map();
+    const invites = await refreshGuildInvites(guild);
+    if (!invites) return;
+
+    let used = null;
+    invites.forEach((inv) => {
+      const prev = before.get(inv.code) ?? 0;
+      const now = inv.uses ?? 0;
+      if (now > prev) used = inv;
+    });
+
+    if (!used) return;
+
+    const inviterId = used.inviter?.id || invitesData.inviteOwners[used.code];
+    if (!inviterId) return;
+
+    invitesData.memberInviter[member.id] = inviterId;
+    invitesData.invitedMembers[inviterId] ??= [];
+    if (!invitesData.invitedMembers[inviterId].includes(member.id)) {
+      invitesData.invitedMembers[inviterId].push(member.id);
+    }
+
+    const stats = ensureInviterStats(inviterId);
+    // If member was in mapping already before, treat as rejoin
+    if (stats && invitesData.memberInviter[member.id] === inviterId) {
+      stats.joins += 1;
+    } else {
+      stats.joins += 1;
+    }
+    saveInvites();
+  } catch {}
+});
+
+client.on("guildMemberRemove", async (member) => {
+  try {
+    const inviterId = invitesData.memberInviter[member.id];
+    if (!inviterId) return;
+    const stats = ensureInviterStats(inviterId);
+    stats.left += 1;
+    saveInvites();
+  } catch {}
+});
+
 /* ===================== INTERACTIONS ===================== */
 
 client.on("interactionCreate", async (interaction) => {
   try {
-    // ====== GLOBAL GUILD BLOCKER ======
+    // Blocked guild handling (must respond fast)
     if (interaction.guildId && isGuildBlocked(interaction.guildId)) {
-      const isOwner = interaction.user?.id === OWNER_ID;
-      const isStopOrResume =
+      const isOwnerBypass =
         interaction.isChatInputCommand() &&
-        (interaction.commandName === "stop" || interaction.commandName === "resume");
+        (interaction.commandName === "resume" || interaction.commandName === "stop") &&
+        interaction.user.id === OWNER_ID;
 
-      if (!isOwner || !isStopOrResume) {
-        if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-          return interaction.reply({ content: RESTRICT_MESSAGE, ephemeral: false }).catch(() => {});
+      if (!isOwnerBypass) {
+        // Always ack so it never times out
+        if (interaction.isButton()) {
+          await safeDeferUpdate(interaction);
+          return;
         }
-        interaction.channel?.send(RESTRICT_MESSAGE).catch(() => {});
-        return;
+        if (interaction.isModalSubmit()) {
+          await safeDeferReply(interaction, { ephemeral: true });
+          return safeReply(interaction, { content: RESTRICT_MESSAGE, ephemeral: true });
+        }
+        if (interaction.isChatInputCommand()) {
+          await safeDeferReply(interaction, { ephemeral: true });
+          return safeReply(interaction, { content: RESTRICT_MESSAGE, ephemeral: false });
+        }
       }
     }
 
-    // Ticket buttons -> modal
-    if (interaction.isButton() && interaction.customId.startsWith("ticket:")) {
-      const typeId = interaction.customId.split("ticket:")[1];
-      const config = getPanelConfig(interaction.guild.id);
-      const ticketType = resolveTicketType(config, typeId);
-      if (!ticketType) return interaction.reply({ content: "This ticket type no longer exists.", ephemeral: true });
+    /* ---------- BUTTONS ---------- */
+    if (interaction.isButton()) {
+      await safeDeferUpdate(interaction);
 
-      const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
-      if (existing) return interaction.reply({ content: `❌ You already have an open ticket: ${existing}`, ephemeral: true });
+      // Ticket button
+      if (interaction.customId.startsWith("ticket:")) {
+        const typeId = interaction.customId.split(":")[1];
+        const cfg = getPanelConfig(interaction.guild.id);
+        const t = resolveTicketType(cfg, typeId);
+        if (!t) {
+          return interaction.followUp({ content: "Unknown ticket type.", ephemeral: true }).catch(() => {});
+        }
 
-      const modal = new ModalBuilder()
-        .setCustomId(`ticket_modal:${ticketType.id}`)
-        .setTitle(String(config.modal?.title || "Ticket Info").slice(0, 45));
+        // Prevent multiple open tickets per user
+        const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
+        if (existing) {
+          return interaction.followUp({ content: `You already have an open ticket: <#${existing.id}>`, ephemeral: true }).catch(() => {});
+        }
 
-      const mcInput = new TextInputBuilder()
-        .setCustomId("mc")
-        .setLabel(String(config.modal?.mcLabel || "What is your Minecraft username?").slice(0, 45))
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(32);
+        const modal = new ModalBuilder()
+          .setCustomId(`ticket_modal:${t.id}`)
+          .setTitle(String(cfg.modal?.title || "Ticket Info").slice(0, 45));
 
-      const needInput = new TextInputBuilder()
-        .setCustomId("need")
-        .setLabel(String(config.modal?.needLabel || "What do you need?").slice(0, 45))
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true)
-        .setMaxLength(1000);
+        const mc = new TextInputBuilder()
+          .setCustomId("mc_username")
+          .setLabel(String(cfg.modal?.mcLabel || "Minecraft username").slice(0, 45))
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
 
-      modal.addComponents(new ActionRowBuilder().addComponents(mcInput), new ActionRowBuilder().addComponents(needInput));
-      return interaction.showModal(modal);
-    }
+        const need = new TextInputBuilder()
+          .setCustomId("need")
+          .setLabel(String(cfg.modal?.needLabel || "What do you need?").slice(0, 45))
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true);
 
-    // Ticket modal submit -> create ticket
-    if (interaction.isModalSubmit() && interaction.customId.startsWith("ticket_modal:")) {
-      await interaction.deferReply({ ephemeral: true });
-
-      const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
-      if (existing) return interaction.editReply(`❌ You already have an open ticket: ${existing}`);
-
-      const typeId = interaction.customId.split("ticket_modal:")[1];
-      const config = getPanelConfig(interaction.guild.id);
-      const type = resolveTicketType(config, typeId);
-      if (!type) return interaction.editReply("Invalid ticket type.");
-
-      const mc = (interaction.fields.getTextInputValue("mc") || "").trim();
-      const need = (interaction.fields.getTextInputValue("need") || "").trim();
-
-      const category = await getOrCreateCategory(interaction.guild, type.category);
-      const channelName = `${type.key}-${cleanName(interaction.user.username)}`.slice(0, 90);
-
-      const overwrites = [
-        { id: interaction.guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-        {
-          id: interaction.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
-        },
-        ...STAFF_ROLE_IDS.map((rid) => ({
-          id: rid,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
-        })),
-      ];
-
-      const createdAt = Date.now();
-
-      const channel = await interaction.guild.channels.create({
-        name: channelName,
-        type: ChannelType.GuildText,
-        parent: category.id,
-        topic: `opener:${interaction.user.id};created:${createdAt};type:${type.id}`,
-        permissionOverwrites: overwrites,
-      });
-
-      const embed = new EmbedBuilder()
-        .setTitle(`${type.label} (${interaction.user.username})`)
-        .setColor(0x2b2d31)
-        .addFields(
-          { name: "Minecraft Username", value: (mc || "N/A").slice(0, 64), inline: true },
-          { name: "Discord User", value: interaction.user.tag, inline: true },
-          { name: "What they need", value: (need || "N/A").slice(0, 1024), inline: false }
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(mc),
+          new ActionRowBuilder().addComponents(need)
         );
 
-      await channel.send({ content: `${interaction.user}`, embeds: [embed] });
-      return interaction.editReply(`✅ Ticket created: ${channel}`);
+        return interaction.showModal(modal).catch(() => {});
+      }
+
+      // Giveaway join/leave
+      if (interaction.customId.startsWith("gw_join:")) {
+        const messageId = interaction.customId.split(":")[1];
+        const gw = giveawayData.giveaways[messageId];
+        if (!gw) return interaction.followUp({ content: "Giveaway not found.", ephemeral: true }).catch(() => {});
+        if (gw.ended) return interaction.followUp({ content: "That giveaway already ended.", ephemeral: true }).catch(() => {});
+
+        // Min invites requirement
+        const needInv = gw.minInvites || 0;
+        if (needInv > 0) {
+          const invCount = invitesStillInServer(interaction.user.id);
+          if (invCount < needInv) {
+            return interaction.followUp({
+              content: `You need **${needInv}** invites to enter. You currently have **${invCount}**.`,
+              ephemeral: true,
+            }).catch(() => {});
+          }
+        }
+
+        const idx = gw.entries.indexOf(interaction.user.id);
+        if (idx >= 0) gw.entries.splice(idx, 1);
+        else gw.entries.push(interaction.user.id);
+
+        saveGiveaways();
+
+        // Update embed entry count
+        const channel = await client.channels.fetch(gw.channelId).catch(() => null);
+        if (channel) {
+          const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
+          if (msg) await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] }).catch(() => {});
+        }
+
+        return interaction.followUp({
+          content: idx >= 0 ? "✅ You left the giveaway." : "✅ You joined the giveaway.",
+          ephemeral: true,
+        }).catch(() => {});
+      }
+
+      return; // other buttons ignored
     }
 
-    // Slash commands
+    /* ---------- MODALS ---------- */
+    if (interaction.isModalSubmit()) {
+      await safeDeferReply(interaction, { ephemeral: true });
+
+      if (!interaction.customId.startsWith("ticket_modal:")) {
+        return safeReply(interaction, { content: "Unknown modal.", ephemeral: true });
+      }
+
+      const typeId = interaction.customId.split(":")[1];
+      const cfg = getPanelConfig(interaction.guild.id);
+      const t = resolveTicketType(cfg, typeId);
+      if (!t) return safeReply(interaction, { content: "Unknown ticket type.", ephemeral: true });
+
+      const mcName = interaction.fields.getTextInputValue("mc_username")?.slice(0, 100) || "Unknown";
+      const need = interaction.fields.getTextInputValue("need")?.slice(0, 1000) || "No details.";
+
+      const guild = interaction.guild;
+
+      // Create / get category
+      const cat = await getOrCreateCategory(guild, t.category);
+
+      // Create channel
+      const chName = `ticket-${cleanName(interaction.user.username)}-${cleanName(t.key)}`.slice(0, 90);
+      const createdAt = Date.now();
+
+      const channel = await guild.channels.create({
+        name: chName,
+        type: ChannelType.GuildText,
+        parent: cat.id,
+        topic: `opener:${interaction.user.id};created:${createdAt};type:${t.id}`,
+        permissionOverwrites: [
+          { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+          { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+          // Staff roles view
+          ...STAFF_ROLE_IDS.map((rid) => ({
+            id: rid,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory],
+          })),
+        ],
+        reason: `Ticket opened by ${interaction.user.tag}`,
+      });
+
+      const openerEmbed = new EmbedBuilder()
+        .setTitle(`New Ticket — ${t.label}`)
+        .setColor(0x2b2d31)
+        .addFields(
+          { name: "User", value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: false },
+          { name: "Minecraft", value: mcName, inline: true },
+          { name: "Need", value: need.slice(0, 1024), inline: false }
+        )
+        .setFooter({ text: "Use /close to close this ticket." });
+
+      await channel.send({ content: `<@${interaction.user.id}>`, embeds: [openerEmbed] }).catch(() => {});
+
+      return safeReply(interaction, { content: `✅ Ticket created: <#${channel.id}>`, ephemeral: true });
+    }
+
+    /* ---------- SLASH COMMANDS ---------- */
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
 
+      // Always ACK immediately
+      const makePublic = (name === "giveaway"); // giveaway should show publicly
+      await safeDeferReply(interaction, { ephemeral: !makePublic });
+
+      // /stop (owner only)
       if (name === "stop") {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "No permission.", ephemeral: true });
+        if (interaction.user.id !== OWNER_ID) {
+          return safeReply(interaction, { content: ONLY_OWNER_MESSAGE, ephemeral: true });
+        }
         const gid = interaction.options.getString("server_id", true).trim();
-        if (!/^\d{10,25}$/.test(gid)) return interaction.reply({ content: "Invalid server ID.", ephemeral: true });
+        if (!/^\d{10,25}$/.test(gid)) return safeReply(interaction, { content: "Invalid server ID.", ephemeral: true });
+
         restrictionsData.blockedGuilds[gid] = { blockedAt: Date.now(), blockedBy: interaction.user.id };
         saveRestrictions();
-        return interaction.reply({ content: `✅ Bot disabled in server: **${gid}**`, ephemeral: true });
+        return safeReply(interaction, { content: `✅ Bot disabled in server: **${gid}**`, ephemeral: true });
       }
 
+      // /resume (owner only)
       if (name === "resume") {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: "No permission.", ephemeral: true });
+        if (interaction.user.id !== OWNER_ID) {
+          return safeReply(interaction, { content: ONLY_OWNER_MESSAGE, ephemeral: true });
+        }
         const gid = interaction.options.getString("server_id", true).trim();
-        if (!/^\d{10,25}$/.test(gid)) return interaction.reply({ content: "Invalid server ID.", ephemeral: true });
+        if (!/^\d{10,25}$/.test(gid)) return safeReply(interaction, { content: "Invalid server ID.", ephemeral: true });
+
         delete restrictionsData.blockedGuilds[gid];
         saveRestrictions();
-        return interaction.reply({ content: `✅ Bot re-enabled in server: **${gid}**`, ephemeral: true });
+        return safeReply(interaction, { content: `✅ Bot re-enabled in server: **${gid}**`, ephemeral: true });
       }
 
+      // /panel (admin only)
       if (name === "panel") {
         const member = await interaction.guild.members.fetch(interaction.user.id);
         if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          return interaction.reply({ content: "Admins only.", ephemeral: true });
+          return safeReply(interaction, { content: "Admins only.", ephemeral: true });
         }
+
         const sub = interaction.options.getSubcommand();
 
         if (sub === "show") {
           const cfg = getPanelConfig(interaction.guild.id);
           const json = JSON.stringify(cfg, null, 2);
-          if (json.length > 1800) return interaction.reply({ content: "Config too large to show here.", ephemeral: true });
-          return interaction.reply({ content: "```json\n" + json + "\n```", ephemeral: true });
+          if (json.length > 1800) return safeReply(interaction, { content: "Config too large to show here.", ephemeral: true });
+          return safeReply(interaction, { content: "```json\n" + json + "\n```", ephemeral: true });
         }
 
         if (sub === "reset") {
           delete panelStore.byGuild[interaction.guild.id];
           savePanelStore();
-          return interaction.reply({ content: "✅ Panel config reset to default.", ephemeral: true });
+          return safeReply(interaction, { content: "✅ Panel config reset to default.", ephemeral: true });
         }
 
         if (sub === "set") {
           const raw = interaction.options.getString("json", true);
-          if (raw.length > 6000) return interaction.reply({ content: "❌ JSON too long. Keep it under ~6000 chars.", ephemeral: true });
+          if (raw.length > 6000) return safeReply(interaction, { content: "❌ JSON too long.", ephemeral: true });
 
           let cfg;
-          try { cfg = JSON.parse(raw); } catch { return interaction.reply({ content: "❌ Invalid JSON.", ephemeral: true }); }
+          try { cfg = JSON.parse(raw); } catch { return safeReply(interaction, { content: "❌ Invalid JSON.", ephemeral: true }); }
 
           const v = validatePanelConfig(cfg);
-          if (!v.ok) return interaction.reply({ content: `❌ ${v.msg}`, ephemeral: true });
+          if (!v.ok) return safeReply(interaction, { content: `❌ ${v.msg}`, ephemeral: true });
 
           panelStore.byGuild[interaction.guild.id] = cfg;
           savePanelStore();
-          return interaction.reply({ content: "✅ Saved panel config for this server.", ephemeral: true });
+          return safeReply(interaction, { content: "✅ Saved panel config for this server.", ephemeral: true });
         }
 
         if (sub === "post") {
           const cfg = getPanelConfig(interaction.guild.id);
           const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
+
           if (!targetChannel || targetChannel.type !== ChannelType.GuildText) {
-            return interaction.reply({ content: "Invalid channel.", ephemeral: true });
+            return safeReply(interaction, { content: "Invalid channel.", ephemeral: true });
           }
+
           const v = validatePanelConfig(cfg);
-          if (!v.ok) return interaction.reply({ content: `❌ Saved config invalid: ${v.msg}`, ephemeral: true });
+          if (!v.ok) return safeReply(interaction, { content: `❌ Saved config invalid: ${v.msg}`, ephemeral: true });
 
           await targetChannel.send(buildTicketPanelMessage(cfg));
-          return interaction.reply({ content: "✅ Posted ticket panel.", ephemeral: true });
+          return safeReply(interaction, { content: "✅ Posted ticket panel.", ephemeral: true });
         }
       }
 
+      // /close (ticket only; opener OR staff OR admin)
       if (name === "close") {
+        const reason = interaction.options.getString("reason", true);
+
         const channel = interaction.channel;
+        if (!channel || channel.type !== ChannelType.GuildText) {
+          return safeReply(interaction, { content: "This command can only be used in a server text channel.", ephemeral: true });
+        }
         if (!isTicketChannel(channel)) {
-          return interaction.reply({ content: "Use **/close** inside a ticket channel.", ephemeral: true });
+          return safeReply(interaction, { content: "This is not a ticket channel.", ephemeral: true });
         }
 
         const meta = getTicketMetaFromTopic(channel.topic);
         const openerId = meta?.openerId;
-
-        const config = getPanelConfig(interaction.guild.id);
-        const t = resolveTicketType(config, meta?.typeId);
-        const ticketTypeLabel = t?.label || "Unknown";
-
-        const reason = interaction.options.getString("reason", true);
+        const opener = openerId ? await interaction.guild.members.fetch(openerId).catch(() => null) : null;
 
         const member = await interaction.guild.members.fetch(interaction.user.id);
-        const isOpener = interaction.user.id === openerId;
-        const canClose = isOpener || isStaff(member);
+        const allowed = (openerId === interaction.user.id) || isStaff(member);
+        if (!allowed) {
+          return safeReply(interaction, { content: "Only the ticket opener or staff can close this ticket.", ephemeral: true });
+        }
 
-        if (!canClose) return interaction.reply({ content: "Only the opener or staff can close this.", ephemeral: true });
+        const cfg = getPanelConfig(interaction.guild.id);
+        const t = resolveTicketType(cfg, meta?.typeId);
+        const dmEmbed = buildCloseDmEmbed({
+          guild: interaction.guild,
+          ticketChannelName: `#${channel.name}`,
+          ticketTypeLabel: t?.label || "Unknown",
+          openedAtMs: meta?.createdAt,
+          closedByTag: interaction.user.tag,
+          reason,
+        });
 
-        try {
-          const openerUser = await client.users.fetch(openerId);
-          await openerUser.send({
-            embeds: [
-              buildCloseDmEmbed({
-                guild: interaction.guild,
-                ticketChannelName: channel.name,
-                ticketTypeLabel,
-                openedAtMs: meta?.createdAt,
-                closedByTag: interaction.user.tag,
-                reason,
-              }),
-            ],
-          });
-        } catch {}
+        if (opener?.user) {
+          opener.user.send({ embeds: [dmEmbed] }).catch(() => {});
+        }
 
-        await interaction.reply({ content: "Closing ticket in 3 seconds...", ephemeral: true });
-        setTimeout(() => channel.delete().catch(() => {}), 3000);
+        await safeReply(interaction, { content: "✅ Closing ticket...", ephemeral: true });
+        setTimeout(() => channel.delete(`Ticket closed by ${interaction.user.tag}: ${reason}`).catch(() => {}), 1200);
         return;
       }
+
+      // /vouches (counts messages in a fixed vouches channel)
+      if (name === "vouches") {
+        const ch = await client.channels.fetch(VOUCHES_CHANNEL_ID).catch(() => null);
+        if (!ch || ch.type !== ChannelType.GuildText) {
+          return safeReply(interaction, { content: "Vouches channel not found or not a text channel.", ephemeral: true });
+        }
+
+        // Fetch messages and count (up to 5000-ish with pagination; keep it safe)
+        let count = 0;
+        let lastId = null;
+
+        for (let i = 0; i < 15; i++) { // 15*100 = 1500 max
+          const batch = await ch.messages.fetch({ limit: 100, before: lastId || undefined }).catch(() => null);
+          if (!batch || batch.size === 0) break;
+
+          count += batch.filter((m) => !m.author.bot && (m.content?.trim()?.length || m.attachments.size)).size;
+          lastId = batch.last().id;
+        }
+
+        return safeReply(interaction, { content: `📩 Vouches (approx): **${count}**`, ephemeral: false });
+      }
+
+      // /giveaway (public)
+      if (name === "giveaway") {
+        const durationStr = interaction.options.getString("duration", true);
+        const winners = interaction.options.getInteger("winners", true);
+        const prize = interaction.options.getString("prize", true);
+        const minInvites = interaction.options.getInteger("min_invites", false) ?? 0;
+
+        const ms = parseDurationToMs(durationStr);
+        if (!ms) return safeReply(interaction, { content: "Invalid duration. Example: `30m` `1h` `2d`", ephemeral: true });
+
+        const endsAt = Date.now() + ms;
+
+        const gw = {
+          channelId: interaction.channelId,
+          messageId: null,
+          hostId: interaction.user.id,
+          prize,
+          winners,
+          minInvites,
+          endsAt,
+          ended: false,
+          entries: [],
+          lastWinners: [],
+        };
+
+        // Post giveaway message
+        const msg = await interaction.channel.send({ embeds: [makeGiveawayEmbed({ ...gw, messageId: "pending" })], components: [giveawayRow(gw)] });
+        gw.messageId = msg.id;
+
+        giveawayData.giveaways[msg.id] = gw;
+        saveGiveaways();
+        scheduleGiveawayEnd(msg.id);
+
+        // Update embed footer w/ messageId
+        await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] }).catch(() => {});
+
+        return safeReply(interaction, { content: "✅ Giveaway started.", ephemeral: true });
+      }
+
+      // /giveaway_end
+      if (name === "giveaway_end") {
+        const mid = interaction.options.getString("message_id", true).trim();
+        if (!giveawayData.giveaways[mid]) return safeReply(interaction, { content: "Giveaway not found.", ephemeral: true });
+
+        // Host or staff/admin
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        const gw = giveawayData.giveaways[mid];
+        const allowed = (gw.hostId === interaction.user.id) || isStaff(member);
+        if (!allowed) return safeReply(interaction, { content: "Only the host or staff can end this giveaway.", ephemeral: true });
+
+        const res = await endGiveaway(mid, interaction.user.id);
+        return safeReply(interaction, { content: res.ok ? "✅ Ended." : `❌ ${res.msg}`, ephemeral: true });
+      }
+
+      // /giveaway_reroll
+      if (name === "giveaway_reroll") {
+        const mid = interaction.options.getString("message_id", true).trim();
+        if (!giveawayData.giveaways[mid]) return safeReply(interaction, { content: "Giveaway not found.", ephemeral: true });
+
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        const gw = giveawayData.giveaways[mid];
+        const allowed = (gw.hostId === interaction.user.id) || isStaff(member);
+        if (!allowed) return safeReply(interaction, { content: "Only the host or staff can reroll this giveaway.", ephemeral: true });
+
+        const res = await rerollGiveaway(mid, interaction.user.id);
+        return safeReply(interaction, { content: res.ok ? "✅ Rerolled." : `❌ ${res.msg}`, ephemeral: true });
+      }
+
+      // Fallback (never timeout)
+      return safeReply(interaction, { content: "⚠️ Command handler missing.", ephemeral: true });
     }
   } catch (e) {
     console.error(e);
     try {
-      if (interaction?.isRepliable?.() && !interaction.replied && !interaction.deferred) {
-        await interaction.reply({ content: "Error handling that interaction.", ephemeral: true });
-      }
+      await safeReply(interaction, { content: "Error handling that interaction.", ephemeral: true });
     } catch {}
   }
 });
 
-/* ===================== MESSAGE HANDLER (BLOCKER + AUTOMOD + PREFIX) ===================== */
+/* ===================== MESSAGE HANDLER (AUTOMOD LINK BLOCKER) ===================== */
 
 client.on("messageCreate", async (message) => {
   try {
     if (!message.guild || message.author.bot) return;
 
+    // If guild blocked: block prefix commands or just warn on messages with commands
     if (isGuildBlocked(message.guild.id)) {
-      if (message.content.startsWith(PREFIX)) await message.channel.send(RESTRICT_MESSAGE).catch(() => {});
+      // Don’t spam; only warn if they try to run bot-ish stuff
+      if (message.content.startsWith("/")) message.channel.send(RESTRICT_MESSAGE).catch(() => {});
       return;
     }
 
     if (containsLink(message.content)) {
       const member = message.member;
-      if (member) {
-        const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
-        const automodRole = message.guild.roles.cache.find((r) => r.name.toLowerCase() === AUTOMOD_ROLE_NAME);
-        const hasBypass = automodRole ? member.roles.cache.has(automodRole.id) : false;
+      if (!member) return;
 
-        if (!isAdmin && !hasBypass) {
-          await message.delete().catch(() => {});
-          message.channel
-            .send(`🚫 ${member}, links aren’t allowed unless you have the **${AUTOMOD_ROLE_NAME}** role.`)
-            .then((m) => setTimeout(() => m.delete().catch(() => {}), 5000))
-            .catch(() => {});
-          return;
-        }
+      const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
+      const automodRole = message.guild.roles.cache.find((r) => r.name.toLowerCase() === AUTOMOD_ROLE_NAME);
+      const hasBypass = automodRole ? member.roles.cache.has(automodRole.id) : false;
+
+      if (!isAdmin && !hasBypass) {
+        await message.delete().catch(() => {});
+        message.channel
+          .send(`🚫 ${member}, links aren’t allowed unless you have the **${AUTOMOD_ROLE_NAME}** role.`)
+          .then((m) => setTimeout(() => m.delete().catch(() => {}), 5000))
+          .catch(() => {});
       }
     }
   } catch (e) {
