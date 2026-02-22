@@ -1,58 +1,18 @@
 /**
- * DonutDemand Bot — Full (keeps everything from this chat) MINUS Carl/MEE6 QoL slash commands
+ * DonutDemand Bot — Full
  *
- * ✅ Slash commands:
- *  /embed (ADMIN) — title/description/color/url/thumbnail/image + optional channel
- *  /vouches — counts messages in vouches channel
- *  /invites <user> — invites still in server only
- *  /generate — personal invite credited to generator (our tracking)
- *  /linkinvite <code/link> — link existing invite code to yourself for credit
- *  /addinvites <user> <amount> — admin only
- *  /resetinvites <user> — ONLY staff role IDs (admins do NOT bypass unless also staff)
- *  /resetall — admin only
- *  /close <reason> — ticket only, opener OR staff OR admin; DMs opener reason; deletes channel
- *  /link <user> — staff/admin: active invited members + invite links used
- *  /operation start <duration> — admin, ticket only: give Customer role + ping vouch + close after timer
- *  /operation cancel — admin, ticket only: cancel timer
+ * Changes you requested:
+ * ✅ /panel slash command (ADMIN only) replaces !ticketpanel
+ *    - Fully configurable via ONE JSON string (stays under Discord option caps)
+ *    - /panel set <json> saves config
+ *    - /panel post [channel] posts the panel using saved config
  *
- * ✅ Giveaways:
- *  /giveaway <duration> <winners> <prize> <min_invites?>
- *  /end <messageId/link> (staff/admin)
- *  /reroll <messageId/link> (staff/admin)
+ * ✅ Ticket close DM is now a FULL EMBED (more like “real ticket bots”)
+ *    - Includes server, ticket type, ticket name, closer, reason, opened time, closed time, next steps
  *
- * ✅ Admin prefix commands (Administrator only):
- *  !ticketpanel
- *  !stick <message>
- *  !unstick
- *  !mute <@user|id>   (5 min timeout + announcement)
- *  !ban <@user|id>    (announcement)
- *  !kick <@user|id>   (announcement)
- *  !purge <amount>    (deletes amount + command)
- *
- * ✅ Tickets:
- *  - 4 types -> 4 categories (auto-create)
- *  - Modal BEFORE opening asks:
- *      - Minecraft username
- *      - What do you need?
- *  - Only 1 open ticket per user
- *  - Staff roles can view tickets
- *
- * ✅ Automod:
- *  - Blocks links unless Admin OR has role named "automod" (auto-created if possible)
- *
- * ✅ Invites:
- *  - Persistent JSON storage (won’t reset on restart)
- *  - Tracks joins / rejoins / leaves / manual
- *  - Join log channel posts:
- *      <user> has been invited by <inviter> and now has <invites> invites.
- *
- * ENV:
- *  TOKEN=...
- *  GUILD_ID=...
- *
- * Dev Portal Intents to enable:
- *  - Server Members Intent
- *  - Message Content Intent
+ * Notes on Discord caps:
+ * - Slash commands have hard limits on number of options per command (max 25).
+ * - To let you customize “everything” without hitting caps, /panel uses ONE string option: JSON config.
  */
 
 require("dotenv").config();
@@ -84,8 +44,11 @@ const GUILD_ID = process.env.GUILD_ID;
 
 const AUTOMOD_ROLE_NAME = "automod";
 
-const CUSTOMER_ROLE_ID = "1455179722089562216";
-const VOUCHES_CHANNEL_ID = "1455198053546983454";
+/** Your updated IDs */
+const CUSTOMER_ROLE_ID = "1474606828875677858";
+const VOUCHES_CHANNEL_ID = "1474606921305821466";
+
+/** unchanged */
 const JOIN_LOG_CHANNEL_ID = "1461947323541225704";
 
 // Staff roles that can SEE tickets + /link + giveaways + /close
@@ -99,24 +62,62 @@ const STAFF_ROLE_IDS = [
 // ONLY these roles can /resetinvites (admins do NOT bypass unless also staff)
 const RESETINVITES_ROLE_IDS = [...STAFF_ROLE_IDS];
 
-const TICKET_TYPES = {
-  ticket_support: { label: "Help & Support", category: "Help & Support", key: "help-support" },
-  ticket_claim: { label: "Claim Order", category: "Claim Order", key: "claim-order" },
-  ticket_sell: { label: "Sell To Us", category: "Sell to Us", key: "sell-to-us" },
-  ticket_rewards: { label: "Rewards", category: "Rewards", key: "rewards" },
+/* ===================== DEFAULT PANEL CONFIG ===================== */
+/**
+ * You can override ALL of this with /panel set (JSON).
+ * Limit: max 4 ticket types (keeps UI clean + safe with Discord component limits)
+ */
+const DEFAULT_PANEL_CONFIG = {
+  embed: {
+    title: "Tickets",
+    description:
+      "Open the right ticket type below.\n\n" +
+      "🆘 Help & Support\n💰 Claim Order\n💸 Sell To Us\n🎁 Rewards",
+    color: "#2b2d31",
+  },
+  modal: {
+    title: "Ticket Info",
+    mcLabel: "What is your Minecraft username?",
+    needLabel: "What do you need?",
+  },
+  tickets: [
+    {
+      id: "ticket_support",
+      label: "Help & Support",
+      category: "Help & Support",
+      key: "help-support",
+      button: { label: "Help & Support", style: "Primary", emoji: "🆘" },
+    },
+    {
+      id: "ticket_claim",
+      label: "Claim Order",
+      category: "Claim Order",
+      key: "claim-order",
+      button: { label: "Claim Order", style: "Success", emoji: "💰" },
+    },
+    {
+      id: "ticket_sell",
+      label: "Sell To Us",
+      category: "Sell to Us",
+      key: "sell-to-us",
+      button: { label: "Sell To Us", style: "Secondary", emoji: "💸" },
+    },
+    {
+      id: "ticket_rewards",
+      label: "Rewards",
+      category: "Rewards",
+      key: "rewards",
+      button: { label: "Rewards", style: "Danger", emoji: "🎁" },
+    },
+  ],
 };
-
-const TICKET_PANEL_TEXT =
-  "🆘 | Help & Support Ticket\nIf you need help with anything, create a support ticket.\n\n" +
-  "💰 | Claim Order\nIf you have placed an order and are waiting to receive it please open this ticket.\n\n" +
-  "💸 | Sell To Us\nWant to make some real cash of the donutsmp? Open a ticket and sell to us here.\n\n" +
-  "🎁 | Claim Rewards Ticket\nLooking to claim rewards, make this ticket.";
 
 /* ===================== STORAGE ===================== */
 
 const DATA_DIR = __dirname;
 const INVITES_FILE = path.join(DATA_DIR, "invites_data.json");
 const GIVEAWAYS_FILE = path.join(DATA_DIR, "giveaways_data.json");
+const PANEL_FILE = path.join(DATA_DIR, "panel_config.json");
 
 function loadJson(file, fallback) {
   try {
@@ -150,11 +151,22 @@ const giveawayData = loadJson(GIVEAWAYS_FILE, { giveaways: {} });
 giveawayData.giveaways ??= {};
 saveJson(GIVEAWAYS_FILE, giveawayData);
 
+/**
+ * Panel config storage is per-guild:
+ * { byGuild: { [guildId]: <config> } }
+ */
+const panelStore = loadJson(PANEL_FILE, { byGuild: {} });
+panelStore.byGuild ??= {};
+saveJson(PANEL_FILE, panelStore);
+
 function saveInvites() {
   saveJson(INVITES_FILE, invitesData);
 }
 function saveGiveaways() {
   saveJson(GIVEAWAYS_FILE, giveawayData);
+}
+function savePanelStore() {
+  saveJson(PANEL_FILE, panelStore);
 }
 
 /* ===================== CLIENT ===================== */
@@ -253,6 +265,8 @@ async function ensureAutoModRole(guild) {
   return role;
 }
 
+/* ===================== INVITES ===================== */
+
 function ensureInviterStats(inviterId) {
   if (!invitesData.inviterStats[inviterId]) {
     invitesData.inviterStats[inviterId] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
@@ -284,6 +298,180 @@ async function refreshGuildInvites(guild) {
   invitesCache.set(guild.id, map);
   return invites;
 }
+
+/* ===================== PANEL CONFIG ===================== */
+
+function getPanelConfig(guildId) {
+  return panelStore.byGuild[guildId] || DEFAULT_PANEL_CONFIG;
+}
+
+function normalizeButtonStyle(style) {
+  const s = String(style || "").toLowerCase();
+  if (s === "primary") return ButtonStyle.Primary;
+  if (s === "secondary") return ButtonStyle.Secondary;
+  if (s === "success") return ButtonStyle.Success;
+  if (s === "danger") return ButtonStyle.Danger;
+  return ButtonStyle.Primary;
+}
+
+function validatePanelConfig(cfg) {
+  if (!cfg || typeof cfg !== "object") return { ok: false, msg: "Config must be a JSON object." };
+
+  const embed = cfg.embed || {};
+  const modal = cfg.modal || {};
+  const tickets = Array.isArray(cfg.tickets) ? cfg.tickets : null;
+
+  if (!tickets || tickets.length < 1) return { ok: false, msg: "Config must include tickets: [...] with at least 1 type." };
+  if (tickets.length > 4) return { ok: false, msg: "Max 4 ticket types (Discord component + clean UI limit)." };
+
+  const title = String(embed.title ?? "").trim();
+  const desc = String(embed.description ?? "").trim();
+  const color = String(embed.color ?? "").trim();
+
+  if (!title || title.length > 256) return { ok: false, msg: "embed.title is required and must be <= 256 chars." };
+  if (!desc || desc.length > 4000) return { ok: false, msg: "embed.description is required and must be <= 4000 chars." };
+  if (color && !parseHexColor(color)) return { ok: false, msg: "embed.color must be a hex like #2b2d31." };
+
+  const mTitle = String(modal.title ?? "Ticket Info");
+  const mcLabel = String(modal.mcLabel ?? "What is your Minecraft username?");
+  const needLabel = String(modal.needLabel ?? "What do you need?");
+
+  if (mTitle.length < 1 || mTitle.length > 45) return { ok: false, msg: "modal.title must be 1-45 chars." };
+  if (mcLabel.length < 1 || mcLabel.length > 45) return { ok: false, msg: "modal.mcLabel must be 1-45 chars." };
+  if (needLabel.length < 1 || needLabel.length > 45) return { ok: false, msg: "modal.needLabel must be 1-45 chars." };
+
+  const seenIds = new Set();
+  for (const t of tickets) {
+    const id = String(t.id || "").trim();
+    const label = String(t.label || "").trim();
+    const category = String(t.category || "").trim();
+    const key = String(t.key || "").trim();
+
+    if (!id || id.length > 100) return { ok: false, msg: "Each ticket needs id (<= 100 chars)." };
+    if (seenIds.has(id)) return { ok: false, msg: `Duplicate ticket id: ${id}` };
+    seenIds.add(id);
+
+    if (!label || label.length > 80) return { ok: false, msg: "Each ticket needs label (<= 80 chars)." };
+    if (!category || category.length > 100) return { ok: false, msg: "Each ticket needs category (<= 100 chars)." };
+    if (!key || key.length > 60) return { ok: false, msg: "Each ticket needs key (<= 60 chars)." };
+
+    const b = t.button || {};
+    const bLabel = String(b.label || "").trim();
+    if (!bLabel || bLabel.length > 80) return { ok: false, msg: "Each ticket.button needs label (<= 80 chars)." };
+
+    const emoji = b.emoji ? String(b.emoji).trim() : "";
+    if (emoji && emoji.length > 40) return { ok: false, msg: "ticket.button.emoji too long." };
+
+    const style = b.style ? String(b.style).trim() : "Primary";
+    if (!["Primary", "Secondary", "Success", "Danger"].includes(style)) {
+      return { ok: false, msg: "ticket.button.style must be Primary/Secondary/Success/Danger." };
+    }
+  }
+
+  return { ok: true, msg: "OK" };
+}
+
+/* ===================== TICKETS ===================== */
+
+async function getOrCreateCategory(guild, name) {
+  let cat = guild.channels.cache.find((c) => c.type === ChannelType.GuildCategory && c.name === name);
+  if (!cat) cat = await guild.channels.create({ name, type: ChannelType.GuildCategory });
+  return cat;
+}
+
+/**
+ * Topic format:
+ * opener:<id>;created:<unixMs>;type:<ticketId>
+ */
+function getTicketMetaFromTopic(topic) {
+  if (!topic) return null;
+  const opener = topic.match(/opener:(\d{10,25})/i)?.[1] || null;
+  const created = topic.match(/created:(\d{10,20})/i)?.[1] || null;
+  const typeId = topic.match(/type:([a-z0-9_\-]{1,100})/i)?.[1] || null;
+  if (!opener) return null;
+  return {
+    openerId: opener,
+    createdAt: created ? Number(created) : null,
+    typeId,
+  };
+}
+
+function isTicketChannel(channel) {
+  return channel && channel.type === ChannelType.GuildText && Boolean(getTicketMetaFromTopic(channel.topic)?.openerId);
+}
+
+function findOpenTicketChannel(guild, openerId) {
+  return guild.channels.cache.find((c) => {
+    if (c.type !== ChannelType.GuildText) return false;
+    const meta = getTicketMetaFromTopic(c.topic);
+    return meta?.openerId === openerId;
+  });
+}
+
+function resolveTicketType(config, typeId) {
+  return (config.tickets || []).find((t) => t.id === typeId) || null;
+}
+
+function buildTicketPanelMessage(config) {
+  const c = parseHexColor(config.embed?.color) ?? 0x2b2d31;
+
+  const embed = new EmbedBuilder()
+    .setTitle(String(config.embed?.title || "Tickets").slice(0, 256))
+    .setDescription(String(config.embed?.description || "Open a ticket below.").slice(0, 4000))
+    .setColor(c);
+
+  const row = new ActionRowBuilder();
+
+  for (const t of config.tickets) {
+    const b = t.button || {};
+    const btn = new ButtonBuilder()
+      .setCustomId(`ticket:${t.id}`)
+      .setLabel(String(b.label || t.label).slice(0, 80))
+      .setStyle(normalizeButtonStyle(b.style || "Primary"));
+
+    if (b.emoji) btn.setEmoji(String(b.emoji));
+    row.addComponents(btn);
+  }
+
+  return { embeds: [embed], components: [row] };
+}
+
+function buildCloseDmEmbed({ guild, ticketChannelName, ticketTypeLabel, openedAtMs, closedByTag, reason }) {
+  const openedUnix = openedAtMs ? Math.floor(openedAtMs / 1000) : null;
+  const closedUnix = Math.floor(Date.now() / 1000);
+
+  const e = new EmbedBuilder()
+    .setTitle("Ticket Closed")
+    .setColor(0xed4245)
+    .setDescription("Your ticket has been closed. Details below:")
+    .addFields(
+      { name: "Server", value: `${guild.name}`, inline: true },
+      { name: "Ticket", value: `${ticketChannelName}`, inline: true },
+      { name: "Type", value: ticketTypeLabel || "Unknown", inline: true },
+      { name: "Closed By", value: closedByTag || "Unknown", inline: true },
+      { name: "Reason", value: String(reason || "No reason provided").slice(0, 1024), inline: false }
+    )
+    .addFields(
+      { name: "Opened", value: openedUnix ? `<t:${openedUnix}:F> (<t:${openedUnix}:R>)` : "Unknown", inline: true },
+      { name: "Closed", value: `<t:${closedUnix}:F> (<t:${closedUnix}:R>)`, inline: true }
+    )
+    .addFields({
+      name: "Next Steps",
+      value:
+        "• If you still need help, open a new ticket from the ticket panel.\n" +
+        "• If this was resolved, please consider leaving a vouch in the vouches channel.\n" +
+        "• Keep your DMs open so you don’t miss updates.",
+      inline: false,
+    })
+    .setFooter({ text: "DonutDemand Support" });
+
+  return e;
+}
+
+/* ===================== STICKY + OPERATION TIMERS ===================== */
+
+const stickyByChannel = new Map(); // channelId -> { content, messageId }
+const activeOperations = new Map(); // channelId -> timeout handle
 
 /* ===================== GIVEAWAYS ===================== */
 
@@ -414,33 +602,6 @@ function scheduleGiveawayEnd(messageId) {
   }, Math.min(delay, MAX));
 }
 
-/* ===================== TICKETS ===================== */
-
-async function getOrCreateCategory(guild, name) {
-  let cat = guild.channels.cache.find((c) => c.type === ChannelType.GuildCategory && c.name === name);
-  if (!cat) cat = await guild.channels.create({ name, type: ChannelType.GuildCategory });
-  return cat;
-}
-
-function getOpenerIdFromTopic(topic) {
-  if (!topic) return null;
-  const m = topic.match(/opener:(\d{10,25})/i);
-  return m ? m[1] : null;
-}
-
-function isTicketChannel(channel) {
-  return channel && channel.type === ChannelType.GuildText && Boolean(getOpenerIdFromTopic(channel.topic));
-}
-
-function findOpenTicketChannel(guild, openerId) {
-  return guild.channels.cache.find((c) => c.type === ChannelType.GuildText && c.topic?.includes(`opener:${openerId}`));
-}
-
-/* ===================== STICKY + OPERATION TIMERS ===================== */
-
-const stickyByChannel = new Map(); // channelId -> { content, messageId }
-const activeOperations = new Map(); // channelId -> timeout handle
-
 /* ===================== SLASH COMMAND REGISTRATION ===================== */
 
 async function registerSlashCommands() {
@@ -464,8 +625,38 @@ async function registerSlashCommands() {
     .addStringOption((o) => o.setName("thumbnail").setDescription("Thumbnail image URL").setRequired(false))
     .addStringOption((o) => o.setName("image").setDescription("Main image URL").setRequired(false));
 
+  const panelCmd = new SlashCommandBuilder()
+    .setName("panel")
+    .setDescription("Admin: configure and post the ticket panel.")
+    .addSubcommand((sub) =>
+      sub
+        .setName("set")
+        .setDescription("Save ticket panel config JSON for this server.")
+        .addStringOption((o) =>
+          o
+            .setName("json")
+            .setDescription("Panel config JSON (embed/title/buttons/categories/etc).")
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("post")
+        .setDescription("Post the ticket panel using saved config.")
+        .addChannelOption((o) =>
+          o
+            .setName("channel")
+            .setDescription("Channel to post in (optional)")
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(false)
+        )
+    )
+    .addSubcommand((sub) => sub.setName("show").setDescription("Show the current saved panel config (ephemeral)."))
+    .addSubcommand((sub) => sub.setName("reset").setDescription("Reset panel config back to default."));
+
   const commands = [
     embedCmd,
+    panelCmd,
 
     new SlashCommandBuilder()
       .setName("link")
@@ -557,8 +748,12 @@ client.once("ready", async () => {
   }
 
   for (const guild of client.guilds.cache.values()) {
-    try { await ensureAutoModRole(guild); } catch {}
-    try { await refreshGuildInvites(guild); } catch {}
+    try {
+      await ensureAutoModRole(guild);
+    } catch {}
+    try {
+      await refreshGuildInvites(guild);
+    } catch {}
   }
 
   for (const messageId of Object.keys(giveawayData.giveaways || {})) {
@@ -569,8 +764,16 @@ client.once("ready", async () => {
 
 /* ===================== INVITE EVENTS + JOIN/LEAVE ===================== */
 
-client.on("inviteCreate", async (invite) => { try { await refreshGuildInvites(invite.guild); } catch {} });
-client.on("inviteDelete", async (invite) => { try { await refreshGuildInvites(invite.guild); } catch {} });
+client.on("inviteCreate", async (invite) => {
+  try {
+    await refreshGuildInvites(invite.guild);
+  } catch {}
+});
+client.on("inviteDelete", async (invite) => {
+  try {
+    await refreshGuildInvites(invite.guild);
+  } catch {}
+});
 
 client.on("guildMemberAdd", async (member) => {
   try {
@@ -590,7 +793,10 @@ client.on("guildMemberAdd", async (member) => {
     for (const inv of invites.values()) {
       const prev = before.get(inv.code) ?? 0;
       const now = inv.uses ?? 0;
-      if (now > prev) { used = inv; break; }
+      if (now > prev) {
+        used = inv;
+        break;
+      }
     }
 
     const after = new Map();
@@ -683,37 +889,43 @@ client.on("interactionCreate", async (interaction) => {
         await msg.edit({ embeds: [makeGiveawayEmbed(gw)], components: [giveawayRow(gw)] });
       } catch {}
 
-      return interaction.reply({ content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.", ephemeral: true });
+      return interaction.reply({
+        content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.",
+        ephemeral: true,
+      });
     }
 
-    // Ticket buttons -> modal
-    if (interaction.isButton() && interaction.customId in TICKET_TYPES) {
+    // Ticket buttons -> modal (uses CURRENT saved config)
+    if (interaction.isButton() && interaction.customId.startsWith("ticket:")) {
+      const typeId = interaction.customId.split("ticket:")[1];
+      const config = getPanelConfig(interaction.guild.id);
+      const ticketType = resolveTicketType(config, typeId);
+      if (!ticketType) return interaction.reply({ content: "This ticket type no longer exists.", ephemeral: true });
+
       const existing = findOpenTicketChannel(interaction.guild, interaction.user.id);
       if (existing) {
         return interaction.reply({ content: `❌ You already have an open ticket: ${existing}`, ephemeral: true });
       }
 
-      const modal = new ModalBuilder().setCustomId(`ticket_modal:${interaction.customId}`).setTitle("Ticket Info");
+      const modal = new ModalBuilder()
+        .setCustomId(`ticket_modal:${ticketType.id}`)
+        .setTitle(String(config.modal?.title || "Ticket Info").slice(0, 45));
 
       const mcInput = new TextInputBuilder()
         .setCustomId("mc")
-        .setLabel("What is your Minecraft username?")
+        .setLabel(String(config.modal?.mcLabel || "What is your Minecraft username?").slice(0, 45))
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setMaxLength(32);
 
       const needInput = new TextInputBuilder()
         .setCustomId("need")
-        .setLabel("What do you need?")
+        .setLabel(String(config.modal?.needLabel || "What do you need?").slice(0, 45))
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(true)
         .setMaxLength(1000);
 
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(mcInput),
-        new ActionRowBuilder().addComponents(needInput)
-      );
-
+      modal.addComponents(new ActionRowBuilder().addComponents(mcInput), new ActionRowBuilder().addComponents(needInput));
       return interaction.showModal(modal);
     }
 
@@ -726,8 +938,9 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.editReply(`❌ You already have an open ticket: ${existing}`);
       }
 
-      const buttonId = interaction.customId.split("ticket_modal:")[1];
-      const type = TICKET_TYPES[buttonId];
+      const typeId = interaction.customId.split("ticket_modal:")[1];
+      const config = getPanelConfig(interaction.guild.id);
+      const type = resolveTicketType(config, typeId);
       if (!type) return interaction.editReply("Invalid ticket type.");
 
       const mc = (interaction.fields.getTextInputValue("mc") || "").trim();
@@ -756,11 +969,13 @@ client.on("interactionCreate", async (interaction) => {
         })),
       ];
 
+      const createdAt = Date.now();
+
       const channel = await interaction.guild.channels.create({
         name: channelName,
         type: ChannelType.GuildText,
         parent: category.id,
-        topic: `opener:${interaction.user.id}`,
+        topic: `opener:${interaction.user.id};created:${createdAt};type:${type.id}`,
         permissionOverwrites: overwrites,
       });
 
@@ -780,6 +995,72 @@ client.on("interactionCreate", async (interaction) => {
     // Slash commands
     if (interaction.isChatInputCommand()) {
       const name = interaction.commandName;
+
+      /* ---------- /panel ---------- */
+      if (name === "panel") {
+        const member = await interaction.guild.members.fetch(interaction.user.id);
+        if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          return interaction.reply({ content: "Admins only.", ephemeral: true });
+        }
+
+        const sub = interaction.options.getSubcommand();
+
+        if (sub === "show") {
+          const cfg = getPanelConfig(interaction.guild.id);
+          const json = JSON.stringify(cfg, null, 2);
+          // keep reply safe size
+          if (json.length > 1800) {
+            return interaction.reply({ content: "Config is too large to display here. Use /panel reset or re-set it.", ephemeral: true });
+          }
+          return interaction.reply({ content: "```json\n" + json + "\n```", ephemeral: true });
+        }
+
+        if (sub === "reset") {
+          delete panelStore.byGuild[interaction.guild.id];
+          savePanelStore();
+          return interaction.reply({ content: "✅ Panel config reset to default.", ephemeral: true });
+        }
+
+        if (sub === "set") {
+          const raw = interaction.options.getString("json", true);
+
+          // Extra safety: don’t let someone paste a novel
+          if (raw.length > 6000) {
+            return interaction.reply({ content: "❌ JSON too long. Keep it under ~6000 characters.", ephemeral: true });
+          }
+
+          let cfg;
+          try {
+            cfg = JSON.parse(raw);
+          } catch {
+            return interaction.reply({ content: "❌ Invalid JSON. Make sure it’s valid JSON format.", ephemeral: true });
+          }
+
+          const v = validatePanelConfig(cfg);
+          if (!v.ok) return interaction.reply({ content: `❌ ${v.msg}`, ephemeral: true });
+
+          panelStore.byGuild[interaction.guild.id] = cfg;
+          savePanelStore();
+          return interaction.reply({ content: "✅ Saved panel config for this server.", ephemeral: true });
+        }
+
+        if (sub === "post") {
+          const cfg = getPanelConfig(interaction.guild.id);
+          const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
+
+          if (!targetChannel || targetChannel.type !== ChannelType.GuildText) {
+            return interaction.reply({ content: "Invalid channel.", ephemeral: true });
+          }
+
+          const v = validatePanelConfig(cfg);
+          if (!v.ok) return interaction.reply({ content: `❌ Saved config is invalid: ${v.msg}`, ephemeral: true });
+
+          const msgPayload = buildTicketPanelMessage(cfg);
+          await targetChannel.send(msgPayload);
+
+          return interaction.reply({ content: "✅ Posted ticket panel.", ephemeral: true });
+        }
+      }
 
       /* ---------- /embed ---------- */
       if (name === "embed") {
@@ -954,7 +1235,13 @@ client.on("interactionCreate", async (interaction) => {
           return interaction.reply({ content: "Use **/close** inside a ticket channel.", ephemeral: true });
         }
 
-        const openerId = getOpenerIdFromTopic(channel.topic);
+        const meta = getTicketMetaFromTopic(channel.topic);
+        const openerId = meta?.openerId;
+        const openedAt = meta?.createdAt;
+        const config = getPanelConfig(interaction.guild.id);
+        const t = resolveTicketType(config, meta?.typeId);
+        const ticketTypeLabel = t?.label || "Unknown";
+
         const reason = interaction.options.getString("reason", true);
 
         const member = await interaction.guild.members.fetch(interaction.user.id);
@@ -971,11 +1258,19 @@ client.on("interactionCreate", async (interaction) => {
           activeOperations.delete(channel.id);
         }
 
+        // DM embed to opener
         try {
           const openerUser = await client.users.fetch(openerId);
-          await openerUser.send(
-            `Your ticket **${channel.name}** was closed by **${interaction.user.tag}**.\nReason: ${reason}`
-          );
+          const dmEmbed = buildCloseDmEmbed({
+            guild: interaction.guild,
+            ticketChannelName: channel.name,
+            ticketTypeLabel,
+            openedAtMs: openedAt,
+            closedByTag: interaction.user.tag,
+            reason,
+          });
+
+          await openerUser.send({ embeds: [dmEmbed] });
         } catch {}
 
         await interaction.reply({ content: "Closing ticket in 3 seconds...", ephemeral: true });
@@ -1016,13 +1311,11 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         const codeList = [...codes].slice(0, 15);
-        const inviteLinks =
-          codeList.length ? codeList.map((c) => `https://discord.gg/${c}`).join("\n") : "None found.";
+        const inviteLinks = codeList.length ? codeList.map((c) => `https://discord.gg/${c}`).join("\n") : "None found.";
 
-        const listText =
-          activeInvited.length
-            ? activeInvited.slice(0, 30).map((x, i) => `${i + 1}. ${x.tag} (code: ${x.code})`).join("\n")
-            : "No active invited members found.";
+        const listText = activeInvited.length
+          ? activeInvited.slice(0, 30).map((x, i) => `${i + 1}. ${x.tag} (code: ${x.code})`).join("\n")
+          : "No active invited members found.";
 
         return interaction.reply({
           ephemeral: true,
@@ -1059,7 +1352,8 @@ client.on("interactionCreate", async (interaction) => {
         const ms = parseDurationToMs(durationStr);
         if (!ms) return interaction.reply({ content: "Invalid duration. Use 10m, 1h, 2d.", ephemeral: true });
 
-        const openerId = getOpenerIdFromTopic(interaction.channel.topic);
+        const meta = getTicketMetaFromTopic(interaction.channel.topic);
+        const openerId = meta?.openerId;
         if (!openerId) return interaction.reply({ content: "Couldn't find ticket opener.", ephemeral: true });
 
         const openerMember = await interaction.guild.members.fetch(openerId).catch(() => null);
@@ -1210,7 +1504,7 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    // Admin-only ! commands
+    // Admin-only ! commands (kept)
     if (message.content.startsWith(PREFIX)) {
       if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
 
@@ -1218,19 +1512,6 @@ client.on("messageCreate", async (message) => {
       const cmd = (parts.shift() || "").toLowerCase();
       const text = message.content.slice(PREFIX.length + cmd.length + 1);
       const arg1 = parts[0];
-
-      if (cmd === "ticketpanel") {
-        const embed = new EmbedBuilder().setTitle("Tickets").setDescription(TICKET_PANEL_TEXT).setColor(0x2b2d31);
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("ticket_support").setLabel("Help & Support").setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId("ticket_claim").setLabel("Claim Order").setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId("ticket_sell").setLabel("Sell To Us").setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId("ticket_rewards").setLabel("Rewards").setStyle(ButtonStyle.Danger)
-        );
-
-        await message.channel.send({ embeds: [embed], components: [row] });
-      }
 
       if (cmd === "stick") {
         if (!text || !text.trim()) return message.reply("Usage: `!stick <message>`");
@@ -1326,3 +1607,19 @@ client.on("messageCreate", async (message) => {
 /* ===================== LOGIN ===================== */
 
 client.login(process.env.TOKEN);
+
+/* ===================== HOW TO USE /panel (EXAMPLE JSON) ===================== */
+/**
+ * /panel set json:{
+ *   "embed":{"title":"Support","description":"Choose a ticket type below.","color":"#5865F2"},
+ *   "modal":{"title":"Ticket Info","mcLabel":"Minecraft IGN","needLabel":"Explain what you need"},
+ *   "tickets":[
+ *     {"id":"ticket_support","label":"Help & Support","category":"Help & Support","key":"help-support",
+ *      "button":{"label":"Support","style":"Primary","emoji":"🆘"}},
+ *     {"id":"ticket_claim","label":"Claim Order","category":"Claim Order","key":"claim-order",
+ *      "button":{"label":"Claim","style":"Success","emoji":"💰"}}
+ *   ]
+ * }
+ *
+ * /panel post (optional channel)
+ */
