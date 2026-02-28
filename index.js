@@ -11,6 +11,16 @@
  * - !calc + /calc: safe calculator with + - x / ^ parentheses
  * - Giveaways with join button, end, reroll
  * - Automod link blocker with bypass role name
+ *
+ * NEW (this rewrite)
+ * - /leaderboard: top 10 inviters (by invites still in server)
+ * - /settings set_rewards_webhook: save rewards webhook URL (per server)
+ * - /panel rewards (admin): configure + post "Claim Rewards" panel (via modal)
+ * - Claim Rewards button:
+ *    - asks MC username + Discord username (via modal)
+ *    - sends to webhook: discord user, mc user, discord name, invites at click time
+ *    - THEN resets inviter’s invites (and cleans memberInviter refs)
+ *    - replies ephemeral: invites reset, rewards paid to MC username after review
  */
 
 try {
@@ -126,8 +136,11 @@ function defaultGuildSettings() {
     joinLogChannelId: null,
     customerRoleId: null,
 
-    // NEW: invite blacklist by userId (string)
+    // invite blacklist by userId (string)
     invitesBlacklist: [],
+
+    // NEW: rewards webhook (per-guild)
+    rewardsWebhookUrl: null,
 
     automod: {
       enabled: true,
@@ -147,6 +160,7 @@ function getGuildSettings(guildId) {
   s.joinLogChannelId ??= null;
   s.customerRoleId ??= null;
   s.invitesBlacklist ??= [];
+  s.rewardsWebhookUrl ??= null;
   s.automod ??= { enabled: true, bypassRoleName: "automod" };
   s.automod.enabled ??= true;
   s.automod.bypassRoleName ??= "automod";
@@ -203,10 +217,22 @@ const DEFAULT_PANEL_CONFIG = {
       button: { label: "Rewards", style: "Danger", emoji: "🎁" },
     },
   ],
+
+  // NEW: optional rewards panel config (admin-managed)
+  rewardsPanel: {
+    text: null, // string
+  },
 };
 
 function getPanelConfig(guildId) {
-  return panelStore.byGuild[guildId] || DEFAULT_PANEL_CONFIG;
+  // Keep backward compatibility with older saved configs
+  const cfg = panelStore.byGuild[guildId] || DEFAULT_PANEL_CONFIG;
+
+  // Ensure rewardsPanel exists without breaking existing configs
+  cfg.rewardsPanel ??= { text: null };
+  cfg.rewardsPanel.text ??= null;
+
+  return cfg;
 }
 
 /* ===================== CLIENT ===================== */
@@ -294,6 +320,26 @@ function isAdminOrOwner(member) {
   return member.permissions.has(PermissionsBitField.Flags.Administrator);
 }
 
+function isValidWebhookUrl(url) {
+  if (!url) return false;
+  const s = String(url).trim();
+  if (!/^https:\/\/(canary\.|ptb\.)?discord\.com\/api\/webhooks\/\d+\/[\w-]+/i.test(s)) return false;
+  return true;
+}
+
+async function sendWebhook(webhookUrl, payload) {
+  // Node 18+ has global fetch; Node 22 definitely does.
+  const res = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Webhook failed (${res.status}) ${text?.slice(0, 200) || ""}`);
+  }
+}
+
 /* ===================== STOP/RESUME GATE ===================== */
 async function denyIfStopped(interactionOrMessage) {
   const guildId = interactionOrMessage.guild?.id;
@@ -323,7 +369,7 @@ async function denyIfStopped(interactionOrMessage) {
   return true;
 }
 
-/* ===================== INVITE BLACKLIST (NEW) ===================== */
+/* ===================== INVITE BLACKLIST ===================== */
 function isBlacklistedInviter(guildId, userId) {
   const s = getGuildSettings(guildId);
   return (s.invitesBlacklist || []).includes(String(userId));
@@ -364,6 +410,23 @@ async function refreshGuildInvites(guild) {
   invites.forEach((inv) => map.set(inv.code, inv.uses ?? 0));
   invitesCache.set(guild.id, map);
   return invites;
+}
+
+/* ===================== RESET INVITES (CLAIM REWARDS) ===================== */
+function resetInvitesForUser(userId) {
+  // wipe stats + invited members
+  invitesData.inviterStats[userId] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
+  delete invitesData.invitedMembers[userId];
+
+  // IMPORTANT: remove memberInviter mappings that point to this inviter,
+  // otherwise future leaves would keep subtracting from a reset inviter.
+  for (const [memberId, inviterId] of Object.entries(invitesData.memberInviter || {})) {
+    if (String(inviterId) === String(userId)) {
+      delete invitesData.memberInviter[memberId];
+    }
+  }
+
+  saveInvites();
 }
 
 /* ===================== BACKUP / RESTORE (INVITES) ===================== */
@@ -853,6 +916,24 @@ function formatCalcResult(n) {
   return s;
 }
 
+/* ===================== REWARDS PANEL ===================== */
+function buildRewardsPanelMessage(guildId, text) {
+  const t = String(text || "Click the button below to claim rewards.").slice(0, 4000);
+
+  const embed = new EmbedBuilder()
+    .setTitle("🎁 Rewards Claim")
+    .setColor(0xed4245)
+    .setDescription(t)
+    .setFooter({ text: "DonutDemand Rewards" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("rewards_claim_btn").setStyle(ButtonStyle.Success).setLabel("Claim Rewards").setEmoji("🎁")
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
 /* ===================== SLASH COMMANDS REGISTRATION ===================== */
 function buildCommandsJSON() {
   const settingsCmd = new SlashCommandBuilder()
@@ -899,6 +980,13 @@ function buildCommandsJSON() {
         .setDescription("Set the customer role used by /operation.")
         .addRoleOption((o) => o.setName("role").setDescription("Customer role").setRequired(true))
     )
+    // NEW: rewards webhook setting
+    .addSubcommand((s) =>
+      s
+        .setName("set_rewards_webhook")
+        .setDescription("Set the rewards claim webhook URL (used by Claim Rewards panel).")
+        .addStringOption((o) => o.setName("url").setDescription("Discord webhook URL").setRequired(true))
+    )
     .addSubcommand((s) =>
       s
         .setName("automod")
@@ -917,7 +1005,7 @@ function buildCommandsJSON() {
 
   const panelCmd = new SlashCommandBuilder()
     .setName("panel")
-    .setDescription("Admin: configure and post the ticket panel.")
+    .setDescription("Admin: configure and post panels.")
     .setDMPermission(false)
     .addSubcommand((sub) =>
       sub
@@ -933,8 +1021,12 @@ function buildCommandsJSON() {
           o.setName("channel").setDescription("Channel to post in (optional)").addChannelTypes(ChannelType.GuildText).setRequired(false)
         )
     )
-    .addSubcommand((sub) => sub.setName("show").setDescription("Show current saved panel config (ephemeral)."))
-    .addSubcommand((sub) => sub.setName("reset").setDescription("Reset panel config back to default."));
+    .addSubcommand((sub) => sub.setName("show").setDescription("Show current saved ticket panel config (ephemeral)."))
+    .addSubcommand((sub) => sub.setName("reset").setDescription("Reset ticket panel config back to default."))
+    // NEW: rewards panel (admin only) config + post via modal
+    .addSubcommand((sub) =>
+      sub.setName("rewards").setDescription("Admin: post a Claim Rewards panel (asks what the panel should say).")
+    );
 
   const stopCmd = new SlashCommandBuilder()
     .setName("stop")
@@ -994,6 +1086,12 @@ function buildCommandsJSON() {
     .setDescription("Calculate an expression. Supports + - x / ^ and parentheses.")
     .setDMPermission(false)
     .addStringOption((o) => o.setName("expression").setDescription("Example: (5x2)+3^2/3").setRequired(true));
+
+  // NEW: leaderboard
+  const leaderboardCmd = new SlashCommandBuilder()
+    .setName("leaderboard")
+    .setDescription("Shows the top 10 inviters in this server.")
+    .setDMPermission(false);
 
   const blacklistCmd = new SlashCommandBuilder()
     .setName("blacklist")
@@ -1114,6 +1212,7 @@ function buildCommandsJSON() {
     restoreCmd,
     embedCmd,
     calcCmd,
+    leaderboardCmd,
     blacklistCmd,
     ...invitesCmds,
     closeCmd,
@@ -1192,6 +1291,7 @@ client.once("ready", async () => {
   for (const guild of client.guilds.cache.values()) {
     await refreshGuildInvites(guild).catch(() => {});
     getGuildSettings(guild.id);
+    getPanelConfig(guild.id);
   }
 
   for (const messageId of Object.keys(giveawayData.giveaways || {})) {
@@ -1202,6 +1302,7 @@ client.once("ready", async () => {
 
 client.on("guildCreate", async (guild) => {
   getGuildSettings(guild.id);
+  getPanelConfig(guild.id);
   await refreshGuildInvites(guild).catch(() => {});
 });
 
@@ -1436,6 +1537,83 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: idx === -1 ? "✅ Entered the giveaway!" : "✅ Removed your entry.", ephemeral: true });
     }
 
+    /* ---------- Rewards claim button -> modal ---------- */
+    if (interaction.isButton() && interaction.customId === "rewards_claim_btn") {
+      const s = getGuildSettings(interaction.guild.id);
+      if (!s.rewardsWebhookUrl) {
+        return interaction.reply({
+          content: "❌ Rewards webhook is not configured. Ask an admin to set it with /settings set_rewards_webhook.",
+          ephemeral: true,
+        });
+      }
+
+      const modal = new ModalBuilder().setCustomId("rewards_claim_modal").setTitle("Claim Rewards");
+
+      const mcInput = new TextInputBuilder()
+        .setCustomId("mc")
+        .setLabel("Minecraft username")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(32);
+
+      const dcInput = new TextInputBuilder()
+        .setCustomId("discordname")
+        .setLabel("Discord username (for payout log)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(64);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(mcInput), new ActionRowBuilder().addComponents(dcInput));
+      return interaction.showModal(modal);
+    }
+
+    /* ---------- Rewards claim modal submit ---------- */
+    if (interaction.isModalSubmit() && interaction.customId === "rewards_claim_modal") {
+      await interaction.deferReply({ ephemeral: true });
+
+      const s = getGuildSettings(interaction.guild.id);
+      const webhookUrl = s.rewardsWebhookUrl;
+
+      if (!webhookUrl) {
+        return interaction.editReply("❌ Rewards webhook is not configured. Ask an admin to set it with /settings set_rewards_webhook.");
+      }
+
+      const mc = (interaction.fields.getTextInputValue("mc") || "").trim();
+      const discordName = (interaction.fields.getTextInputValue("discordname") || "").trim();
+
+      if (!mc || !discordName) return interaction.editReply("❌ Please fill out all fields.");
+
+      // compute invites BEFORE reset
+      const invitesBefore = invitesStillInServerForGuild(interaction.guild.id, interaction.user.id);
+
+      // send to webhook FIRST. If webhook fails, do NOT reset.
+      const embed = new EmbedBuilder()
+        .setTitle("🎁 Rewards Claim Submitted")
+        .setColor(0xed4245)
+        .addFields(
+          { name: "Server", value: `${interaction.guild.name} (\`${interaction.guild.id}\`)`, inline: false },
+          { name: "Discord User", value: `${interaction.user} — **${interaction.user.tag}** (\`${interaction.user.id}\`)`, inline: false },
+          { name: "Minecraft Username", value: `\`${mc}\``, inline: true },
+          { name: "Discord Username (provided)", value: `\`${discordName}\``, inline: true },
+          { name: "Invites at Claim Time", value: `**${invitesBefore}**`, inline: true }
+        )
+        .setFooter({ text: "DonutDemand Rewards • Claim log" })
+        .setTimestamp();
+
+      try {
+        await sendWebhook(webhookUrl, { embeds: [embed.toJSON()] });
+      } catch (e) {
+        return interaction.editReply(`❌ Failed to submit claim to webhook: ${String(e?.message || e).slice(0, 180)}`);
+      }
+
+      // reset invites AFTER successful webhook
+      resetInvitesForUser(interaction.user.id);
+
+      return interaction.editReply(
+        `✅ Your claim was submitted.\nYour invites have been reset and the rewards will be paid to **${mc}** after an admin reviews it.`
+      );
+    }
+
     /* ---------- Ticket close button -> modal ---------- */
     if (interaction.isButton() && interaction.customId === "ticket_close_btn") {
       if (!isTicketChannel(interaction.channel)) {
@@ -1532,6 +1710,34 @@ client.on("interactionCreate", async (interaction) => {
 
       modal.addComponents(new ActionRowBuilder().addComponents(mcInput), new ActionRowBuilder().addComponents(needInput));
       return interaction.showModal(modal);
+    }
+
+    /* ---------- Rewards panel configure modal submit ---------- */
+    if (interaction.isModalSubmit() && interaction.customId === "rewards_panel_modal") {
+      const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+      if (!member || !isAdminOrOwner(member)) {
+        return interaction.reply({ content: "Admins only.", ephemeral: true });
+      }
+
+      const text = (interaction.fields.getTextInputValue("text") || "").trim();
+      if (!text) return interaction.reply({ content: "❌ Panel text cannot be empty.", ephemeral: true });
+
+      const cfg = getPanelConfig(interaction.guild.id);
+      cfg.rewardsPanel ??= { text: null };
+      cfg.rewardsPanel.text = text.slice(0, 4000);
+
+      // persist into panelStore
+      panelStore.byGuild[interaction.guild.id] = cfg;
+      savePanelStore();
+
+      // post in the same channel the command was used in (stored on interaction message context via channel)
+      const targetChannel = interaction.channel;
+      if (!targetChannel || targetChannel.type !== ChannelType.GuildText) {
+        return interaction.reply({ content: "❌ Invalid channel to post in.", ephemeral: true });
+      }
+
+      await targetChannel.send(buildRewardsPanelMessage(interaction.guild.id, cfg.rewardsPanel.text));
+      return interaction.reply({ content: "✅ Posted Claim Rewards panel.", ephemeral: true });
     }
 
     /* ---------- Ticket modal submit ---------- */
@@ -1683,6 +1889,42 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
+    /* ---------- /leaderboard (PUBLIC) ---------- */
+    if (name === "leaderboard") {
+      await interaction.deferReply({ ephemeral: false });
+
+      // Collect candidates from stored inviterStats keys.
+      const ids = Object.keys(invitesData.inviterStats || {});
+      if (!ids.length) return interaction.editReply("No invite data yet.");
+
+      // Compute counts for this guild (blacklist-aware), sort desc
+      const scored = ids
+        .map((id) => ({ id, count: invitesStillInServerForGuild(interaction.guild.id, id) }))
+        .filter((x) => x.count > 0) // hide zeros so it looks clean; remove this line if you want to show zeros too
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+
+      if (!scored.length) return interaction.editReply("No inviters with invites yet.");
+
+      // Resolve tags best-effort
+      const lines = [];
+      for (let i = 0; i < scored.length; i++) {
+        const entry = scored[i];
+        const member = await interaction.guild.members.fetch(entry.id).catch(() => null);
+        const label = member ? `**${member.user.tag}**` : `<@${entry.id}>`;
+        lines.push(`**${i + 1}.** ${label} — **${entry.count}** invite(s)`);
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle("🏆 Invite Leaderboard — Top 10")
+        .setColor(0xed4245)
+        .setDescription(lines.join("\n"))
+        .setFooter({ text: "Invites still in the server" })
+        .setTimestamp();
+
+      return interaction.editReply({ embeds: [embed] });
+    }
+
     /* ---------- /blacklist (ADMIN/OWNER) NOT EPHEMERAL ---------- */
     if (name === "blacklist") {
       const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
@@ -1705,10 +1947,8 @@ client.on("interactionCreate", async (interaction) => {
         if (!s.invitesBlacklist.includes(String(user.id))) s.invitesBlacklist.push(String(user.id));
         saveSettings();
 
-        // Optional: wipe their invite stats so they show 0 immediately
-        invitesData.inviterStats[user.id] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
-        delete invitesData.invitedMembers[user.id];
-        saveInvites();
+        // wipe their invite stats so they show 0 immediately
+        resetInvitesForUser(user.id);
 
         return interaction.reply(`✅ Blacklisted ${user} — their invites will always stay **0**.`);
       }
@@ -1735,6 +1975,7 @@ client.on("interactionCreate", async (interaction) => {
           joinLogChannelId: s.joinLogChannelId,
           customerRoleId: s.customerRoleId,
           invitesBlacklist: s.invitesBlacklist,
+          rewardsWebhookUrl: s.rewardsWebhookUrl,
           automod: s.automod,
         };
         const json = JSON.stringify(safe, null, 2);
@@ -1788,6 +2029,20 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: `✅ Customer role set to ${role}.`, ephemeral: true });
       }
 
+      // NEW: set rewards webhook
+      if (sub === "set_rewards_webhook") {
+        const url = interaction.options.getString("url", true).trim();
+        if (!isValidWebhookUrl(url)) {
+          return interaction.reply({
+            content: "❌ That doesn't look like a valid Discord webhook URL. It should start with `https://discord.com/api/webhooks/...`",
+            ephemeral: true,
+          });
+        }
+        s.rewardsWebhookUrl = url;
+        saveSettings();
+        return interaction.reply({ content: "✅ Rewards webhook saved for this server.", ephemeral: true });
+      }
+
       if (sub === "automod") {
         const enabled = interaction.options.getString("enabled", true) === "on";
         const bypassName = interaction.options.getString("bypass_role_name", false);
@@ -1807,10 +2062,16 @@ client.on("interactionCreate", async (interaction) => {
       if (!member || !isAdminOrOwner(member)) return interaction.reply({ content: "Admins only.", ephemeral: true });
 
       const sub = interaction.options.getSubcommand();
+      const cfg = getPanelConfig(interaction.guild.id);
 
       if (sub === "show") {
-        const cfg = getPanelConfig(interaction.guild.id);
-        const json = JSON.stringify(cfg, null, 2);
+        const showCfg = {
+          embed: cfg.embed,
+          modal: cfg.modal,
+          tickets: cfg.tickets,
+          rewardsPanel: cfg.rewardsPanel,
+        };
+        const json = JSON.stringify(showCfg, null, 2);
         if (json.length > 1800) return interaction.reply({ content: "Config too large to show here.", ephemeral: true });
         return interaction.reply({ content: "```json\n" + json + "\n```", ephemeral: true });
       }
@@ -1825,31 +2086,49 @@ client.on("interactionCreate", async (interaction) => {
         const raw = interaction.options.getString("json", true);
         if (raw.length > 6000) return interaction.reply({ content: "❌ JSON too long. Keep it under ~6000 chars.", ephemeral: true });
 
-        let cfg;
+        let newCfg;
         try {
-          cfg = JSON.parse(raw);
+          newCfg = JSON.parse(raw);
         } catch {
           return interaction.reply({ content: "❌ Invalid JSON.", ephemeral: true });
         }
 
-        const v = validatePanelConfig(cfg);
+        const v = validatePanelConfig(newCfg);
         if (!v.ok) return interaction.reply({ content: `❌ ${v.msg}`, ephemeral: true });
 
-        panelStore.byGuild[interaction.guild.id] = cfg;
+        // Preserve/merge rewards panel settings if not present
+        newCfg.rewardsPanel ??= cfg.rewardsPanel ?? { text: null };
+
+        panelStore.byGuild[interaction.guild.id] = newCfg;
         savePanelStore();
-        return interaction.reply({ content: "✅ Saved panel config for this server.", ephemeral: true });
+        return interaction.reply({ content: "✅ Saved ticket panel config for this server.", ephemeral: true });
       }
 
       if (sub === "post") {
-        const cfg = getPanelConfig(interaction.guild.id);
         const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
-        if (!targetChannel || targetChannel.type !== ChannelType.GuildText) return interaction.reply({ content: "Invalid channel.", ephemeral: true });
+        if (!targetChannel || targetChannel.type !== ChannelType.GuildText)
+          return interaction.reply({ content: "Invalid channel.", ephemeral: true });
 
         const v = validatePanelConfig(cfg);
         if (!v.ok) return interaction.reply({ content: `❌ Saved config invalid: ${v.msg}`, ephemeral: true });
 
         await targetChannel.send(buildTicketPanelMessage(cfg));
         return interaction.reply({ content: "✅ Posted ticket panel.", ephemeral: true });
+      }
+
+      // NEW: /panel rewards -> modal (ask what panel says) -> post panel -> save text
+      if (sub === "rewards") {
+        const modal = new ModalBuilder().setCustomId("rewards_panel_modal").setTitle("Rewards Panel");
+
+        const input = new TextInputBuilder()
+          .setCustomId("text")
+          .setLabel("What should the rewards panel say?")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(4000);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+        return interaction.showModal(modal);
       }
     }
 
@@ -1861,7 +2140,8 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       const targetChannel = interaction.options.getChannel("channel", false) || interaction.channel;
-      if (!targetChannel || targetChannel.type !== ChannelType.GuildText) return interaction.reply({ content: "Invalid channel.", ephemeral: true });
+      if (!targetChannel || targetChannel.type !== ChannelType.GuildText)
+        return interaction.reply({ content: "Invalid channel.", ephemeral: true });
 
       const title = interaction.options.getString("title", false);
       const description = interaction.options.getString("description", false);
@@ -2001,9 +2281,7 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       const user = interaction.options.getUser("user", true);
-      invitesData.inviterStats[user.id] = { joins: 0, rejoins: 0, left: 0, manual: 0 };
-      delete invitesData.invitedMembers[user.id];
-      saveInvites();
+      resetInvitesForUser(user.id);
 
       return interaction.reply({ content: `✅ Reset invite stats for **${user.tag}**.` });
     }
