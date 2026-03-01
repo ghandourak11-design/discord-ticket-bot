@@ -1,18 +1,22 @@
 /**
- * DonutDemand Stock Bot — Single File (discord.js v14)
+ * DonutDemand Stock + Prices Bot — Single File (discord.js v14)
  * Commands:
- *  - /stock
- *  - /stock channel (admin)  -> set stock channel
+ *  - /stock show
+ *  - /stock channel (admin)              -> set stock channel
+ *  - /prices show
+ *  - /prices channel (admin)             -> set prices channel
  *  - /settings show (admin)
- *  - /settings set_channel (admin) -> supports type: stock
+ *  - /settings set_channel (admin)       -> supports type: stock | prices
  *
  * Auto:
- *  - Every 1 minute, fetch Base44 Product entities and update the stock message in the configured channel.
+ *  - Every 1 minute, fetch Base44 Product entities and update:
+ *      - Stock message (in stock channel)
+ *      - Prices message (in prices channel)
  *
  * ENV:
  *  - TOKEN=discord_bot_token
  *  - BASE44_API_KEY=your_base44_api_key
- *  - BASE44_BASE_URL=https://donutdemand.net        (or your Base44-hosted domain)
+ *  - BASE44_BASE_URL=https://donutdemand.net
  */
 
 "use strict";
@@ -38,7 +42,7 @@ const {
 } = require("discord.js");
 
 /* -------------------- CONFIG -------------------- */
-const BASE44_APP_ID = "698bba4e9e06a075e7c32be6"; // hardcoded (you said idc)
+const BASE44_APP_ID = "698bba4e9e06a075e7c32be6"; // hardcoded
 const UPDATE_INTERVAL_MS = 60_000; // 1 min
 
 const TOKEN = process.env.TOKEN;
@@ -65,9 +69,17 @@ saveJson(SETTINGS_FILE, store);
 
 function getGuildSettings(guildId) {
   store.byGuild[guildId] ??= {
+    // Stock
     stockChannelId: null,
     lastStockMessageId: null,
     lastStockHash: null,
+
+    // Prices
+    pricesChannelId: null,
+    lastPricesMessageId: null,
+    lastPricesHash: null,
+
+    // Health
     lastOkAt: null,
     lastError: null,
   };
@@ -89,9 +101,7 @@ function buildCommandsJSON() {
     .setName("stock")
     .setDescription("Show current stock (and manage stock auto-updates).")
     .setDMPermission(false)
-    .addSubcommand((s) =>
-      s.setName("show").setDescription("Show current stock in this channel.")
-    )
+    .addSubcommand((s) => s.setName("show").setDescription("Show current stock in this channel."))
     .addSubcommand((s) =>
       s
         .setName("channel")
@@ -100,6 +110,24 @@ function buildCommandsJSON() {
           o
             .setName("channel")
             .setDescription("Channel to post stock updates in")
+            .addChannelTypes(ChannelType.GuildText)
+            .setRequired(true)
+        )
+    );
+
+  const pricesCmd = new SlashCommandBuilder()
+    .setName("prices")
+    .setDescription("Show live prices (and manage prices auto-updates).")
+    .setDMPermission(false)
+    .addSubcommand((s) => s.setName("show").setDescription("Show current prices in this channel."))
+    .addSubcommand((s) =>
+      s
+        .setName("channel")
+        .setDescription("Set the prices auto-update channel (admin).")
+        .addChannelOption((o) =>
+          o
+            .setName("channel")
+            .setDescription("Channel to post price updates in")
             .addChannelTypes(ChannelType.GuildText)
             .setRequired(true)
         )
@@ -119,7 +147,10 @@ function buildCommandsJSON() {
             .setName("type")
             .setDescription("Which channel setting to change?")
             .setRequired(true)
-            .addChoices({ name: "stock", value: "stock" })
+            .addChoices(
+              { name: "stock", value: "stock" },
+              { name: "prices", value: "prices" }
+            )
         )
         .addChannelOption((o) =>
           o
@@ -130,7 +161,7 @@ function buildCommandsJSON() {
         )
     );
 
-  return [stockCmd, settingsCmd].map((c) => c.toJSON());
+  return [stockCmd, pricesCmd, settingsCmd].map((c) => c.toJSON());
 }
 
 function getRest() {
@@ -183,26 +214,39 @@ async function fetchBase44Products() {
   return [];
 }
 
-function groupByCategory(products) {
-  const groups = new Map();
-  for (const p of products) {
-    const name = String(p?.name ?? "Unnamed");
-    const qtyRaw = p?.quantity ?? p?.stock ?? p?.qty ?? 0;
-    const quantity = Number.isFinite(Number(qtyRaw)) ? Number(qtyRaw) : 0;
-    const category = String(p?.category ?? "Other");
+/* -------------------- HELPERS -------------------- */
+function normalizeCategory(raw) {
+  const c = String(raw ?? "Other").trim();
+  return c.length ? c : "Other";
+}
 
+function sortCategories(a, b) {
+  const A = String(a || "");
+  const B = String(b || "");
+  const aIsItems = A.toLowerCase() === "items";
+  const bIsItems = B.toLowerCase() === "items";
+  if (aIsItems && !bIsItems) return -1; // Items first
+  if (!aIsItems && bIsItems) return 1;
+  return A.localeCompare(B);
+}
+
+function groupByCategory(products, mapper) {
+  const groups = new Map();
+
+  for (const p of products) {
+    const category = normalizeCategory(p?.category);
     if (!groups.has(category)) groups.set(category, []);
-    groups.get(category).push({ name, quantity });
+    groups.get(category).push(mapper(p));
   }
 
   // sort each group by name
   for (const [cat, items] of groups.entries()) {
-    items.sort((a, b) => a.name.localeCompare(b.name));
+    items.sort((a, b) => String(a.name).localeCompare(String(b.name)));
     groups.set(cat, items);
   }
 
-  // sort categories
-  return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  // sort categories (Items first)
+  return [...groups.entries()].sort((a, b) => sortCategories(a[0], b[0]));
 }
 
 function hashProducts(products) {
@@ -210,37 +254,57 @@ function hashProducts(products) {
     .map((p) => ({
       name: String(p?.name ?? ""),
       quantity: Number(p?.quantity ?? p?.stock ?? p?.qty ?? 0) || 0,
-      category: String(p?.category ?? "Other"),
+      price: Number(p?.price ?? p?.priceUsd ?? p?.cost ?? p?.amount ?? NaN),
+      category: normalizeCategory(p?.category),
     }))
     .sort((a, b) => (a.category + a.name).localeCompare(b.category + b.name));
 
   return crypto.createHash("sha256").update(JSON.stringify(minimal)).digest("hex");
 }
 
+function money(val) {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return null;
+  // if someone stores cents, you can change this later — keeping simple for now
+  return `$${n.toFixed(2)}`;
+}
+
+function nowStampLine() {
+  const ts = Math.floor(Date.now() / 1000);
+  return `Updated: <t:${ts}:R> • <t:${ts}:t>`;
+}
+
+/* -------------------- EMBEDS -------------------- */
 function buildStockEmbed(products, guildName) {
-  const grouped = groupByCategory(products);
+  const grouped = groupByCategory(products, (p) => {
+    const name = String(p?.name ?? "Unnamed");
+    const qtyRaw = p?.quantity ?? p?.stock ?? p?.qty ?? 0;
+    const quantity = Number.isFinite(Number(qtyRaw)) ? Number(qtyRaw) : 0;
+    return { name, quantity };
+  });
 
   const embed = new EmbedBuilder()
-    .setTitle("📦 Stock Update")
-    .setDescription(`Live stock pulled from Base44.\nServer: **${guildName}**`)
+    .setTitle("📦 Live Stock")
+    .setDescription(`**${guildName}**\n${nowStampLine()}\n\nStock pulled from Base44.`)
     .setColor(0xed4245)
     .setTimestamp();
 
   if (!products.length) {
     embed.addFields({ name: "No products", value: "Nothing returned from Base44.", inline: false });
+    embed.setFooter({ text: "Auto-updates every 1 minute" });
     return embed;
   }
 
-  // Discord embed field value limit is 1024. We'll chunk categories if needed.
+  // chunk categories to fit field limit (1024)
   for (const [cat, items] of grouped) {
     const lines = items.map((x) => `• ${x.name} — **${x.quantity}**`);
     let value = lines.join("\n");
+
     if (value.length <= 1024) {
       embed.addFields({ name: cat, value, inline: false });
       continue;
     }
 
-    // chunk the lines to fit
     let buf = "";
     let part = 1;
     for (const line of lines) {
@@ -255,53 +319,119 @@ function buildStockEmbed(products, guildName) {
     if (buf) embed.addFields({ name: `${cat} (part ${part})`, value: buf, inline: false });
   }
 
-  embed.setFooter({ text: "Auto-updates every 1 minute" });
+  embed.setFooter({ text: "Auto-updates every 1 minute • /stock show to post anywhere" });
   return embed;
 }
 
-/* -------------------- STOCK UPDATE LOOP -------------------- */
-async function updateStockForGuild(guild) {
-  const s = getGuildSettings(guild.id);
-  if (!s.stockChannelId) return;
+function buildPricesEmbed(products, guildName) {
+  const grouped = groupByCategory(products, (p) => {
+    const name = String(p?.name ?? "Unnamed");
+    const priceRaw = p?.price ?? p?.priceUsd ?? p?.cost ?? p?.amount ?? null;
+    const price = money(priceRaw);
+    return { name, price };
+  });
 
-  const channel = await guild.channels.fetch(s.stockChannelId).catch(() => null);
-  if (!channel || channel.type !== ChannelType.GuildText) {
-    s.lastError = "Stock channel not found or not a text channel.";
-    saveStore();
-    return;
+  const embed = new EmbedBuilder()
+    .setTitle("💸 Live Prices")
+    .setDescription(`**${guildName}**\n${nowStampLine()}\n\nPrices pulled from Base44.`)
+    .setColor(0x57f287)
+    .setTimestamp();
+
+  if (!products.length) {
+    embed.addFields({ name: "No products", value: "Nothing returned from Base44.", inline: false });
+    embed.setFooter({ text: "Auto-updates every 1 minute" });
+    return embed;
   }
+
+  for (const [cat, items] of grouped) {
+    const lines = items.map((x) => `• ${x.name} — **${x.price ?? "N/A"}**`);
+    let value = lines.join("\n");
+
+    if (value.length <= 1024) {
+      embed.addFields({ name: cat, value, inline: false });
+      continue;
+    }
+
+    let buf = "";
+    let part = 1;
+    for (const line of lines) {
+      if ((buf + "\n" + line).length > 1024) {
+        embed.addFields({ name: `${cat} (part ${part})`, value: buf || "-", inline: false });
+        buf = line;
+        part++;
+      } else {
+        buf = buf ? buf + "\n" + line : line;
+      }
+    }
+    if (buf) embed.addFields({ name: `${cat} (part ${part})`, value: buf, inline: false });
+  }
+
+  embed.setFooter({ text: "Auto-updates every 1 minute • /prices show to post anywhere" });
+  return embed;
+}
+
+/* -------------------- UPDATE LOOPS -------------------- */
+async function getTextChannel(guild, channelId) {
+  if (!channelId) return null;
+  const channel = await guild.channels.fetch(channelId).catch(() => null);
+  if (!channel) return null;
+  if (channel.type !== ChannelType.GuildText) return null;
+  return channel;
+}
+
+async function upsertEmbedMessage(channel, lastMessageId, embed) {
+  if (lastMessageId) {
+    const msg = await channel.messages.fetch(lastMessageId).catch(() => null);
+    if (msg) {
+      await msg.edit({ embeds: [embed] }).catch(() => {});
+      return msg.id;
+    }
+  }
+  const sent = await channel.send({ embeds: [embed] });
+  return sent.id;
+}
+
+async function updateForGuild(guild) {
+  const s = getGuildSettings(guild.id);
+
+  const stockChannel = await getTextChannel(guild, s.stockChannelId);
+  const pricesChannel = await getTextChannel(guild, s.pricesChannelId);
+
+  // If neither is configured, nothing to do
+  if (!stockChannel && !pricesChannel) return;
 
   try {
     const products = await fetchBase44Products();
     const newHash = hashProducts(products);
 
-    // if nothing changed, do nothing
-    if (s.lastStockHash && s.lastStockHash === newHash && s.lastStockMessageId) {
-      s.lastOkAt = Date.now();
-      s.lastError = null;
-      saveStore();
-      return;
-    }
+    // STOCK
+    if (stockChannel) {
+      const shouldUpdateStock =
+        !s.lastStockMessageId || !s.lastStockHash || s.lastStockHash !== newHash;
 
-    const embed = buildStockEmbed(products, guild.name);
-
-    // Try edit existing message
-    if (s.lastStockMessageId) {
-      const msg = await channel.messages.fetch(s.lastStockMessageId).catch(() => null);
-      if (msg) {
-        await msg.edit({ embeds: [embed] }).catch(() => {});
+      if (shouldUpdateStock) {
+        const stockEmbed = buildStockEmbed(products, guild.name);
+        s.lastStockMessageId = await upsertEmbedMessage(stockChannel, s.lastStockMessageId, stockEmbed);
         s.lastStockHash = newHash;
-        s.lastOkAt = Date.now();
-        s.lastError = null;
-        saveStore();
-        return;
       }
+    } else if (s.stockChannelId) {
+      s.lastError = "Stock channel not found or not a text channel.";
     }
 
-    // Otherwise send new message
-    const sent = await channel.send({ embeds: [embed] });
-    s.lastStockMessageId = sent.id;
-    s.lastStockHash = newHash;
+    // PRICES
+    if (pricesChannel) {
+      const shouldUpdatePrices =
+        !s.lastPricesMessageId || !s.lastPricesHash || s.lastPricesHash !== newHash;
+
+      if (shouldUpdatePrices) {
+        const pricesEmbed = buildPricesEmbed(products, guild.name);
+        s.lastPricesMessageId = await upsertEmbedMessage(pricesChannel, s.lastPricesMessageId, pricesEmbed);
+        s.lastPricesHash = newHash;
+      }
+    } else if (s.pricesChannelId) {
+      s.lastError = "Prices channel not found or not a text channel.";
+    }
+
     s.lastOkAt = Date.now();
     s.lastError = null;
     saveStore();
@@ -311,10 +441,10 @@ async function updateStockForGuild(guild) {
   }
 }
 
-function startStockLoop() {
+function startLoop() {
   setInterval(async () => {
     for (const guild of client.guilds.cache.values()) {
-      await updateStockForGuild(guild).catch(() => {});
+      await updateForGuild(guild).catch(() => {});
     }
   }, UPDATE_INTERVAL_MS);
 }
@@ -335,14 +465,18 @@ client.on("interactionCreate", async (interaction) => {
 
         const ch = interaction.options.getChannel("channel", true);
         const s = getGuildSettings(interaction.guild.id);
+
         s.stockChannelId = ch.id;
-        s.lastStockMessageId = null; // reset so it posts fresh
+        s.lastStockMessageId = null;
         s.lastStockHash = null;
         saveStore();
 
-        await interaction.reply({ content: `✅ Stock channel set to ${ch}. I’ll auto-update every **1 minute**.`, ephemeral: true });
-        // push an immediate update
-        await updateStockForGuild(interaction.guild).catch(() => {});
+        await interaction.reply({
+          content: `✅ Stock channel set to ${ch}. I’ll auto-update every **1 minute**.`,
+          ephemeral: true,
+        });
+
+        await updateForGuild(interaction.guild).catch(() => {});
         return;
       }
 
@@ -350,6 +484,36 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.deferReply({ ephemeral: false });
       const products = await fetchBase44Products();
       const embed = buildStockEmbed(products, interaction.guild.name);
+      return interaction.editReply({ embeds: [embed] });
+    }
+
+    if (interaction.commandName === "prices") {
+      const sub = interaction.options.getSubcommand();
+
+      if (sub === "channel") {
+        if (!isAdmin) return interaction.reply({ content: "Admins only.", ephemeral: true });
+
+        const ch = interaction.options.getChannel("channel", true);
+        const s = getGuildSettings(interaction.guild.id);
+
+        s.pricesChannelId = ch.id;
+        s.lastPricesMessageId = null;
+        s.lastPricesHash = null;
+        saveStore();
+
+        await interaction.reply({
+          content: `✅ Prices channel set to ${ch}. I’ll auto-update every **1 minute**.`,
+          ephemeral: true,
+        });
+
+        await updateForGuild(interaction.guild).catch(() => {});
+        return;
+      }
+
+      // /prices show
+      await interaction.deferReply({ ephemeral: false });
+      const products = await fetchBase44Products();
+      const embed = buildPricesEmbed(products, interaction.guild.name);
       return interaction.editReply({ embeds: [embed] });
     }
 
@@ -363,6 +527,8 @@ client.on("interactionCreate", async (interaction) => {
         const pretty = {
           stockChannelId: s.stockChannelId,
           lastStockMessageId: s.lastStockMessageId,
+          pricesChannelId: s.pricesChannelId,
+          lastPricesMessageId: s.lastPricesMessageId,
           lastOkAt: s.lastOkAt,
           lastError: s.lastError,
           base44BaseUrl: BASE44_BASE_URL,
@@ -386,7 +552,18 @@ client.on("interactionCreate", async (interaction) => {
           saveStore();
 
           await interaction.reply({ content: `✅ Stock channel set to ${ch}.`, ephemeral: true });
-          await updateStockForGuild(interaction.guild).catch(() => {});
+          await updateForGuild(interaction.guild).catch(() => {});
+          return;
+        }
+
+        if (type === "prices") {
+          s.pricesChannelId = ch.id;
+          s.lastPricesMessageId = null;
+          s.lastPricesHash = null;
+          saveStore();
+
+          await interaction.reply({ content: `✅ Prices channel set to ${ch}.`, ephemeral: true });
+          await updateForGuild(interaction.guild).catch(() => {});
           return;
         }
 
@@ -421,10 +598,10 @@ client.once("ready", async () => {
 
   // Immediate update for guilds that already have a channel set
   for (const guild of client.guilds.cache.values()) {
-    await updateStockForGuild(guild).catch(() => {});
+    await updateForGuild(guild).catch(() => {});
   }
 
-  startStockLoop();
+  startLoop();
 });
 
 /* -------------------- LOGIN -------------------- */
