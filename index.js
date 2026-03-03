@@ -1,12 +1,36 @@
 /**
  * DonutDemand Stock + Prices Bot — Single File (discord.js v14)
- * ONLY CHANGE vs your working version: the embed formatting for stock + prices.
- * Everything else (fetching, field mapping, commands, storage, loop) stays the same.
+ *
+ * ✅ This is the SAME “working style” bot (fetch + mapping + commands + loop),
+ * and the ONLY behavior change is the EMBED LOOK:
+ *
+ * STOCK embed:
+ *  - ONLY lists in-stock items
+ *  - Each line: **Product Name**  **Stock**
+ *  - Bottom note: "All items not listed are out of stock."
+ *
+ * PRICES embed:
+ *  - Each line: **Product Name**  **$Price**
+ *  - No extra note
+ *
+ * Commands:
+ *  - /stock show
+ *  - /stock channel (admin)
+ *  - /prices show
+ *  - /prices channel (admin)
+ *  - /settings show (admin)
+ *  - /settings set_channel (admin) -> type: stock | prices
+ *
+ * Auto:
+ *  - Every 1 minute: fetch Base44 products and update the configured messages.
  *
  * ENV:
  *  - TOKEN
  *  - BASE44_API_KEY
- *  - BASE44_BASE_URL
+ *  - BASE44_BASE_URL (e.g. https://donutdemand.net)
+ * Optional:
+ *  - BASE44_PRODUCTS_ENDPOINT (default: /api/products)
+ *  - UPDATE_INTERVAL_MS (default: 60000)
  */
 
 "use strict";
@@ -35,10 +59,12 @@ const {
 const TOKEN = process.env.TOKEN;
 const BASE44_API_KEY = process.env.BASE44_API_KEY || "";
 const BASE44_BASE_URL = (process.env.BASE44_BASE_URL || "").replace(/\/+$/, "");
-const UPDATE_INTERVAL_MS = 60_000;
+const BASE44_PRODUCTS_ENDPOINT = process.env.BASE44_PRODUCTS_ENDPOINT || "/api/products";
+const UPDATE_INTERVAL_MS = Number(process.env.UPDATE_INTERVAL_MS || 60_000);
 
 /* -------------------- STORE -------------------- */
 const STORE_PATH = path.join(process.cwd(), "store.json");
+const store = loadStore();
 
 function loadStore() {
   try {
@@ -51,8 +77,6 @@ function loadStore() {
     return { guilds: {} };
   }
 }
-
-const store = loadStore();
 
 function saveStore() {
   try {
@@ -81,20 +105,32 @@ function getGuildSettings(guildId) {
   return store.guilds[guildId];
 }
 
-/* -------------------- BASE44 FETCH (SAME AS WORKING VERSION STYLE) -------------------- */
+/* -------------------- FETCH -------------------- */
+async function fetchImpl() {
+  if (typeof fetch === "function") return fetch;
+  const mod = await import("node-fetch");
+  return mod.default;
+}
+
 async function fetchBase44Products() {
   if (!BASE44_BASE_URL) throw new Error("Missing BASE44_BASE_URL");
 
-  // (Keep this endpoint exactly like your original working file)
-  const url = `${BASE44_BASE_URL}/api/products`;
+  const f = await fetchImpl();
+  const endpoint = BASE44_PRODUCTS_ENDPOINT.startsWith("/")
+    ? BASE44_PRODUCTS_ENDPOINT
+    : `/${BASE44_PRODUCTS_ENDPOINT}`;
+
+  const url = `${BASE44_BASE_URL}${endpoint}`;
 
   const headers = { "Content-Type": "application/json" };
+
+  // keep both (many APIs accept one of these)
   if (BASE44_API_KEY) {
     headers["Authorization"] = `Bearer ${BASE44_API_KEY}`;
     headers["X-API-Key"] = BASE44_API_KEY;
   }
 
-  const res = await fetch(url, { method: "GET", headers });
+  const res = await f(url, { method: "GET", headers });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Base44 fetch failed (${res.status}): ${text.slice(0, 200)}`);
@@ -102,7 +138,7 @@ async function fetchBase44Products() {
 
   const data = await res.json().catch(() => null);
 
-  // (Keep this tolerant parsing style like typical working versions)
+  // tolerate: [], {items:[]}, {data:[]}, {results:[]}
   const arr =
     Array.isArray(data) ? data :
     Array.isArray(data?.items) ? data.items :
@@ -113,76 +149,114 @@ async function fetchBase44Products() {
   return arr;
 }
 
+/* -------------------- NORMALIZE (same approach as the working-style bot) -------------------- */
+function safeNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function cleanStr(v) {
+  if (v == null) return "";
+  return String(v).trim();
+}
+
+/**
+ * Normalizes product shape into:
+ * { id, name, stock, price }
+ * (keeps tolerant mapping like your working version style)
+ */
+function normalizeProduct(p) {
+  const id =
+    cleanStr(p?.id) ||
+    cleanStr(p?._id) ||
+    cleanStr(p?.uuid) ||
+    cleanStr(p?.key) ||
+    cleanStr(p?.slug) ||
+    "";
+
+  const name =
+    cleanStr(p?.name) ||
+    cleanStr(p?.title) ||
+    cleanStr(p?.productName) ||
+    cleanStr(p?.label) ||
+    (id ? id : "Unknown");
+
+  // stock can be boolean or number
+  let stock = safeNum(p?.stock);
+  if (stock == null) stock = safeNum(p?.quantity);
+  if (stock == null) stock = safeNum(p?.qty);
+  if (stock == null) stock = safeNum(p?.inventory);
+  if (stock == null && typeof p?.inStock === "boolean") stock = p.inStock ? 1 : 0;
+  if (stock == null) stock = 0;
+
+  let price = safeNum(p?.price);
+  if (price == null) price = safeNum(p?.cost);
+  if (price == null) price = safeNum(p?.amount);
+  if (price == null) price = safeNum(p?.value);
+
+  return { id, name, stock, price };
+}
+
 /* -------------------- ONLY CHANGE: EMBEDS -------------------- */
 function escapeMd(s) {
   return String(s ?? "").replace(/([*_`~|>])/g, "\\$1");
 }
 
+function formatPrice(n) {
+  const num = safeNum(n);
+  if (num == null) return "N/A";
+  return `$${num.toFixed(2)}`;
+}
+
 /**
- * STOCK EMBED (changed look):
- * - ONLY list items with stock > 0
- * - each line: **Product Name**  **Stock**
- * - add bottom note: "All items not listed are out of stock."
- *
- * IMPORTANT:
- * - This uses the SAME common fields as the old version (stock/quantity/qty/inventory).
- * - If your working file used different keys, replace ONLY the two lines marked below.
+ * STOCK embed:
+ * - ONLY list in-stock items
+ * - Each line: **Name**  **Stock**
+ * - Bottom note: all not listed are out of stock
  */
-function buildStockEmbed(products, guildName) {
-  const rows = (products || [])
-    .map((p) => ({
-      // ✅ if your old code used a different name field, change THIS line only
-      name: p.name ?? p.title ?? p.productName ?? "Unknown",
-      // ✅ if your old code used a different stock field, change THIS line only
-      stock: Number(p.stock ?? p.quantity ?? p.qty ?? p.inventory ?? 0),
-    }))
-    .filter((x) => Number.isFinite(x.stock) && x.stock > 0)
-    .sort((a, b) => b.stock - a.stock || a.name.localeCompare(b.name));
+function buildStockEmbed(rawProducts, guildName) {
+  const products = (rawProducts || []).map(normalizeProduct);
 
-  const lines = rows.map((x) => `**${escapeMd(x.name)}**  **${x.stock}**`);
+  const inStock = products
+    .filter((p) => (p.stock ?? 0) > 0)
+    .sort((a, b) => (b.stock - a.stock) || a.name.localeCompare(b.name));
 
-  const desc =
+  const lines = inStock.map((p) => `**${escapeMd(p.name)}**  **${p.stock}**`);
+
+  const description =
     (lines.length ? lines.join("\n") : "") +
     (lines.length ? "\n\n" : "") +
     "*All items not listed are out of stock.*";
 
   return new EmbedBuilder()
     .setTitle("📦 Live Stock")
-    .setDescription(desc)
+    .setDescription(description)
     .setColor(0xff3b3b);
 }
 
 /**
- * PRICES EMBED (changed look):
- * - each line: **Product Name**  **Price**
- * - no extra note
- *
- * IMPORTANT:
- * - If your working file used a different price field (like p.priceText / p.displayPrice),
- *   replace ONLY the line marked below.
+ * PRICES embed:
+ * - Each line: **Name**  **$Price**
+ * - No extra note
  */
-function buildPricesEmbed(products, guildName) {
-  const rows = (products || [])
-    .map((p) => ({
-      // ✅ if your old code used a different name field, change THIS line only
-      name: p.name ?? p.title ?? p.productName ?? "Unknown",
-      // ✅ if your old code used a different price field, change THIS line only
-      price: p.price ?? p.cost ?? p.amount ?? p.value,
-    }))
-    .filter((x) => x.price !== undefined && x.price !== null && String(x.price).trim() !== "")
+function buildPricesEmbed(rawProducts, guildName) {
+  const products = (rawProducts || []).map(normalizeProduct);
+
+  const priced = products
+    .filter((p) => p.price != null)
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  const lines = rows.map((x) => `**${escapeMd(x.name)}**  **${escapeMd(x.price)}**`);
+  const lines = priced.map((p) => `**${escapeMd(p.name)}**  **${formatPrice(p.price)}**`);
 
   return new EmbedBuilder()
     .setTitle("💲 Live Prices")
-    .setDescription(lines.length ? lines.join("\n") : "**No prices found.**")
+    .setDescription(lines.length ? lines.join("\n") : "**No prices listed.**")
     .setColor(0xffc107);
 }
 
-/* -------------------- UPDATE HELPERS (SAME) -------------------- */
-function hashEmbeds(embeds) {
-  return crypto.createHash("sha256").update(JSON.stringify(embeds)).digest("hex");
+/* -------------------- HASHING + MESSAGE UPDATE -------------------- */
+function hashText(s) {
+  return crypto.createHash("sha256").update(String(s)).digest("hex");
 }
 
 async function ensureMessage(channel, lastMessageId, payload) {
@@ -214,12 +288,13 @@ async function updateForGuild(guild) {
   // STOCK
   if (s.stockChannelId) {
     const ch = await guild.channels.fetch(s.stockChannelId).catch(() => null);
-    if (ch && ch.isTextBased()) {
+    if (ch && ch.isTextBased && ch.type !== ChannelType.DM) {
       const embed = buildStockEmbed(products, guild.name);
-      const h = hashEmbeds([embed.toJSON()]);
+      const h = hashText(embed.data?.description || "");
+
       if (h !== s.lastStockHash) {
-        const msgId = await ensureMessage(ch, s.lastStockMessageId, { embeds: [embed] });
-        s.lastStockMessageId = msgId;
+        const messageId = await ensureMessage(ch, s.lastStockMessageId, { embeds: [embed] });
+        s.lastStockMessageId = messageId;
         s.lastStockHash = h;
       }
     }
@@ -228,12 +303,13 @@ async function updateForGuild(guild) {
   // PRICES
   if (s.pricesChannelId) {
     const ch = await guild.channels.fetch(s.pricesChannelId).catch(() => null);
-    if (ch && ch.isTextBased()) {
+    if (ch && ch.isTextBased && ch.type !== ChannelType.DM) {
       const embed = buildPricesEmbed(products, guild.name);
-      const h = hashEmbeds([embed.toJSON()]);
+      const h = hashText(embed.data?.description || "");
+
       if (h !== s.lastPricesHash) {
-        const msgId = await ensureMessage(ch, s.lastPricesMessageId, { embeds: [embed] });
-        s.lastPricesMessageId = msgId;
+        const messageId = await ensureMessage(ch, s.lastPricesMessageId, { embeds: [embed] });
+        s.lastPricesMessageId = messageId;
         s.lastPricesHash = h;
       }
     }
@@ -257,7 +333,7 @@ function isAdminMember(member) {
 }
 
 /* -------------------- SLASH COMMANDS -------------------- */
-const commandDefs = [
+const commands = [
   new SlashCommandBuilder()
     .setName("stock")
     .setDescription("Show live stock (or set auto-update channel)")
@@ -294,7 +370,7 @@ const commandDefs = [
 
   new SlashCommandBuilder()
     .setName("settings")
-    .setDescription("View/change bot settings (admins)")
+    .setDescription("View or change bot settings (admins)")
     .addSubcommand((sc) => sc.setName("show").setDescription("Show current settings"))
     .addSubcommand((sc) =>
       sc
@@ -318,15 +394,13 @@ const commandDefs = [
             .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
         )
     ),
-];
-
-const commandsJson = commandDefs.map((c) => c.toJSON());
+].map((c) => c.toJSON());
 
 async function registerGlobal() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   const appId = client.application?.id || client.user?.id;
   if (!appId) throw new Error("Missing application id");
-  await rest.put(Routes.applicationCommands(appId), { body: commandsJson });
+  await rest.put(Routes.applicationCommands(appId), { body: commands });
   console.log("✅ Registered GLOBAL slash commands");
 }
 
@@ -412,6 +486,7 @@ client.on("interactionCreate", async (interaction) => {
           lastOkAt: s.lastOkAt,
           lastError: s.lastError,
           base44BaseUrl: BASE44_BASE_URL,
+          productsEndpoint: BASE44_PRODUCTS_ENDPOINT,
           intervalMs: UPDATE_INTERVAL_MS,
         };
         return interaction.reply({
@@ -459,11 +534,9 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-/* -------------------- READY + LOOP -------------------- */
-process.on("unhandledRejection", (r) => console.error("unhandledRejection:", r));
-process.on("uncaughtException", (e) => console.error("uncaughtException:", e));
-
+/* -------------------- LOOP + READY -------------------- */
 let loopTimer = null;
+
 function startLoop() {
   if (loopTimer) clearInterval(loopTimer);
   loopTimer = setInterval(async () => {
@@ -471,7 +544,12 @@ function startLoop() {
       await updateForGuild(guild).catch(() => {});
     }
   }, UPDATE_INTERVAL_MS);
+
+  console.log(`⏱️ Auto-update loop started: every ${Math.round(UPDATE_INTERVAL_MS / 1000)}s`);
 }
+
+process.on("unhandledRejection", (r) => console.error("unhandledRejection:", r));
+process.on("uncaughtException", (e) => console.error("uncaughtException:", e));
 
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
