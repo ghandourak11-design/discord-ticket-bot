@@ -32,25 +32,67 @@ client.on('interactionCreate', async interaction => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const products = await response.json();
             
-            const embed = new EmbedBuilder()
-                .setTitle('📦 Donut Demand - Stock')
-                .setColor(0x3498db)
-                .setTimestamp();
-            
-            if (Array.isArray(products) && products.length > 0) {
+            const items = [];
+            const crates = [];
+            const bundles = [];
+            let hasOutOfStock = false;
+
+            if (Array.isArray(products)) {
                 products.forEach(product => {
-                    if (product.name && product.quantity !== undefined) {
-                        embed.addFields({
-                            name: product.name,
-                            value: `${product.quantity} units`,
-                            inline: true
-                        });
+                    const quantity = product.quantity || 0;
+                    
+                    if (quantity === 0) {
+                        hasOutOfStock = true;
+                        return;
+                    }
+                    
+                    const type = product.type?.toLowerCase() || 'item';
+                    const field = {
+                        name: product.name || 'Unknown',
+                        value: `${quantity} units`,
+                        inline: true
+                    };
+                    
+                    if (type.includes('bundle')) {
+                        bundles.push(field);
+                    } else if (type.includes('crate')) {
+                        crates.push(field);
+                    } else {
+                        items.push(field);
                     }
                 });
-            } else {
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle('📦 Donut Demand - Stock Levels')
+                .setColor(0xFFD700)
+                .setTimestamp();
+            
+            if (items.length > 0) {
+                embed.addFields({ name: '📌 Items', value: '\u200b', inline: false });
+                embed.addFields(...items);
+            }
+            
+            if (crates.length > 0) {
+                embed.addFields({ name: '📦 Crates', value: '\u200b', inline: false });
+                embed.addFields(...crates);
+            }
+            
+            if (bundles.length > 0) {
+                embed.addFields({ name: '🎁 Bundles', value: '\u200b', inline: false });
+                embed.addFields(...bundles);
+            }
+            
+            if (items.length === 0 && crates.length === 0 && bundles.length === 0) {
                 embed.addFields({
                     name: 'Status',
-                    value: 'No products available',
+                    value: 'All products are out of stock',
+                    inline: false
+                });
+            } else if (hasOutOfStock) {
+                embed.addFields({
+                    name: '\u200b',
+                    value: '*Items not shown are out of stock*',
                     inline: false
                 });
             }
@@ -73,22 +115,52 @@ client.on('interactionCreate', async interaction => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const products = await response.json();
             
-            const embed = new EmbedBuilder()
-                .setTitle('💰 Donut Demand - Prices')
-                .setColor(0xf39c12)
-                .setTimestamp();
-            
-            if (Array.isArray(products) && products.length > 0) {
+            const items = [];
+            const crates = [];
+            const bundles = [];
+
+            if (Array.isArray(products)) {
                 products.forEach(product => {
-                    if (product.name && product.price !== undefined) {
-                        embed.addFields({
-                            name: product.name,
-                            value: `$${product.price.toFixed(2)}`,
-                            inline: true
-                        });
+                    const price = product.price || 0;
+                    
+                    const type = product.type?.toLowerCase() || 'item';
+                    const field = {
+                        name: product.name || 'Unknown',
+                        value: `$${price.toFixed(2)}`,
+                        inline: true
+                    };
+                    
+                    if (type.includes('bundle')) {
+                        bundles.push(field);
+                    } else if (type.includes('crate')) {
+                        crates.push(field);
+                    } else {
+                        items.push(field);
                     }
                 });
-            } else {
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle('💰 Donut Demand - Prices')
+                .setColor(0x00FF00)
+                .setTimestamp();
+            
+            if (items.length > 0) {
+                embed.addFields({ name: '📌 Items', value: '\u200b', inline: false });
+                embed.addFields(...items);
+            }
+            
+            if (crates.length > 0) {
+                embed.addFields({ name: '📦 Crates', value: '\u200b', inline: false });
+                embed.addFields(...crates);
+            }
+            
+            if (bundles.length > 0) {
+                embed.addFields({ name: '🎁 Bundles', value: '\u200b', inline: false });
+                embed.addFields(...bundles);
+            }
+            
+            if (items.length === 0 && crates.length === 0 && bundles.length === 0) {
                 embed.addFields({
                     name: 'Status',
                     value: 'No products available',
