@@ -1,31 +1,25 @@
-// Improved embed functions for /prices and /stock commands
+const Discord = require('discord.js');
 
-const { MessageEmbed } = require('discord.js');
+function buildStockEmbed(stockData) {
+    const embed = new Discord.MessageEmbed();
+    embed.setTitle('Stock Information');
 
-// Function to create the embed for prices
-const createPricesEmbed = (pricesData) => {
-    const embed = new MessageEmbed()
-        .setTitle('Current Prices')
-        .setColor('#0099ff');
-
-    pricesData.forEach(price => {
-        embed.addField(price.name, `$${price.value}`, true);
+    // Use fields instead of description
+    stockData.forEach(item => {
+        embed.addField(item.name, `Quantity: ${item.quantity}`, true);
     });
 
     return embed;
-};
+}
 
-// Function to create the embed for stock
-const createStockEmbed = (stockData) => {
-    const embed = new MessageEmbed()
-        .setTitle('Current Stock Status')
-        .setColor('#ff9900');
+function buildPricesEmbed(pricesData) {
+    const embed = new Discord.MessageEmbed();
+    embed.setTitle('Current Prices');
 
-    stockData.forEach(stock => {
-        embed.addField(stock.item, `Available: ${stock.available}`, true);
+    // Use fields instead of description
+    pricesData.forEach(item => {
+        embed.addField(item.product, `Price: ${item.price}`, true);
     });
 
     return embed;
-};
-
-module.exports = { createPricesEmbed, createStockEmbed };
+}
