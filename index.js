@@ -1,60 +1,28 @@
-const { Client, Intents, MessageEmbed } = require('discord.js');
-const axios = require('axios');
+// Updated index.js
 
-const client = new Client({ intents: [Intents.FLAGS.GUILDS, Intents.FLAGS.GUILD_MESSAGES] });
+const { Client, GatewayIntentBits } = require('discord.js');
+const fetch = require('node-fetch');
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// Load environment variables
-const BASE44_API_KEY = process.env.BASE44_API_KEY;
-const BASE44_BASE_URL = process.env.BASE44_BASE_URL;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
-const REGISTER_SCOPE = process.env.REGISTER_SCOPE;
-const TOKEN = process.env.TOKEN;
+// Your command handling and other setup code goes here
 
-client.once('ready', () => {
-    console.log(`Logged in as ${client.user.tag}`);
+client.on('ready', () => {
+    console.log(`Logged in as ${client.user.tag}!`);
 });
 
-client.on('messageCreate', async message => {
-    if (message.content.startsWith('/stock')) {
-        try {
-            const response = await axios.get(`${BASE44_BASE_URL}/stock`, {
-                headers: {
-                    'Authorization': `Bearer ${BASE44_API_KEY}`
-                }
-            });
-            const stockData = response.data;
-            const embed = new MessageEmbed()
-                .setColor('#0099ff')
-                .setTitle('Stock Information')
-                .addField('Stock Name', stockData.name)
-                .addField('Current Price', stockData.price)
-                .addField('Change', stockData.change);
-            message.channel.send({ embeds: [embed] });
-        } catch (error) {
-            console.error('Error fetching stock data:', error);
-            message.channel.send('There was an error fetching the stock data.');
-        }
-    }
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isCommand()) return;
 
-    if (message.content.startsWith('/prices')) {
-        try {
-            const response = await axios.get(`${BASE44_BASE_URL}/prices`, {
-                headers: {
-                    'Authorization': `Bearer ${BASE44_API_KEY}`
-                }
-            });
-            const pricesData = response.data;
-            const embed = new MessageEmbed()
-                .setColor('#0099ff')
-                .setTitle('Price Information')
-                .addField('Prices', pricesData.prices.join(', '));
-            message.channel.send({ embeds: [embed] });
-        } catch (error) {
-            console.error('Error fetching prices data:', error);
-            message.channel.send('There was an error fetching the prices data.');
-        }
+    const { commandName } = interaction;
+
+    if (commandName === 'yourcommand') {
+        // Use Fetch API instead of Axios
+        const response = await fetch('https://API_URL', { method: 'GET' });
+        const data = await response.json();
+ 
+        await interaction.reply({ content: `Response data: ${data}`, ephemeral: true });
     }
 });
 
-client.login(TOKEN);
+// Log in with your bot token
+client.login('YOUR_BOT_TOKEN');
