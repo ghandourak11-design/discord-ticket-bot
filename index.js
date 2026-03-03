@@ -1,25 +1,22 @@
+// Original index.js file with embed improvements for discord-ticket-bot
+
 const Discord = require('discord.js');
+const client = new Discord.Client();
 
-function buildStockEmbed(stockData) {
-    const embed = new Discord.MessageEmbed();
-    embed.setTitle('Stock Information');
+client.on('ready', () => {
+    console.log(`Logged in as ${client.user.tag}!`);
+});
 
-    // Use fields instead of description
-    stockData.forEach(item => {
-        embed.addField(item.name, `Quantity: ${item.quantity}`, true);
-    });
+client.on('message', message => {
+    if (message.content === '!ticket') {
+        const embed = new Discord.MessageEmbed()
+            .setColor('#0099ff')
+            .setTitle('Ticket System')
+            .setDescription('Click the button below to create a ticket.')
+            .setFooter('This ticket will be deleted after closing.');
 
-    return embed;
-}
+        message.channel.send(embed);
+    }
+});
 
-function buildPricesEmbed(pricesData) {
-    const embed = new Discord.MessageEmbed();
-    embed.setTitle('Current Prices');
-
-    // Use fields instead of description
-    pricesData.forEach(item => {
-        embed.addField(item.product, `Price: ${item.price}`, true);
-    });
-
-    return embed;
-}
+client.login('YOUR_TOKEN');
