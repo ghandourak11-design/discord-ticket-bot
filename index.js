@@ -1,64 +1,54 @@
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const axios = require('axios');
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
-const BASE44_API_KEY = process.env.BASE44_API_KEY;
+
+// Replace 'your_api_key' with your actual API key
+const API_KEY = 'your_api_key';
+const API_URL = 'https://app.base44.com/api/apps/698bba4e9e06a075e7c32be6/entities/Product';
 
 client.once('ready', () => {
-    console.log('✅ Bot ready!');
+    console.log(`Logged in as ${client.user.tag}`);
 });
 
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-    const { commandName } = interaction;
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isCommand()) return;
 
-    if (commandName === 'stock') {
+    if (interaction.commandName === 'stock') {
         try {
-            const response = await fetch('https://api.apps/698bba4de9e06a075e7c32be6/entities/Product', {
-                method: 'GET',
-                headers: { 'api_key': BASE44_API_KEY, 'Content-Type': 'application/json' },
-            });
-            const data = await response.json();
-            await interaction.reply(`📦 Stock: ${JSON.stringify(data)}`);
-        } catch (e) {
-            await interaction.reply('❌ Error fetching stock');
+            const response = await axios.get(API_URL, { headers: { 'api_key': API_KEY } });
+            const data = response.data;
+            const embed = new EmbedBuilder()
+                .setColor('#0099ff')
+                .setTitle('Current Stock')
+                .setDescription('Here is the current stock information')
+                .addFields(
+                    ...data.map(item => ({ name: item.productName, value: `Stock: ${item.stock}`, inline: true }))
+                );
+            await interaction.reply({ embeds: [embed] });
+        } catch (error) {
+            console.error(error);
+            await interaction.reply('There was an error fetching the stock data.');
         }
-    } else if (commandName === 'prices') {
+    }
+
+    if (interaction.commandName === 'prices') {
         try {
-            const response = await fetch('https://api.apps/698bba4de9e06a075e7c32be6/entities/Product', {
-                method: 'GET',
-                headers: { 'api_key': BASE44_API_KEY, 'Content-Type': 'application/json' },
-            });
-            const data = await response.json();
-            await interaction.reply(`💰 Prices: ${JSON.stringify(data)}`);
-        } catch (e) {
-            await interaction.reply('❌ Error fetching prices');
+            const response = await axios.get(API_URL, { headers: { 'api_key': API_KEY } });
+            const data = response.data;
+            const embed = new EmbedBuilder()
+                .setColor('#00ff99')
+                .setTitle('Current Prices')
+                .setDescription('Here are the current price listings')
+                .addFields(
+                    ...data.map(item => ({ name: item.productName, value: `Price: ${item.price}`, inline: true }))
+                );
+            await interaction.reply({ embeds: [embed] });
+        } catch (error) {
+            console.error(error);
+            await interaction.reply('There was an error fetching the price data.');
         }
     }
 });
 
-const { REST } = require('@discordjs/rest');
-const { Routes } = require('discord-api-types/v9');
-
-const commands = [
-    { name: 'stock', description: 'Get stock information' },
-    { name: 'prices', description: 'Get prices information' },
-];
-
-const rest = new REST({ version: '9' }).setToken(TOKEN);
-
-(async () => {
-    try {
-        console.log('Registering commands...');
-        await rest.put(
-            Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-            { body: commands },
-        );
-        console.log('✅ Commands registered');
-    } catch (error) {
-        console.error(error);
-    }
-})();
-
-client.login(TOKEN);
+client.login('your_bot_token');
