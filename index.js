@@ -1,22 +1,65 @@
-// Base44 API integration
-const axios = require('axios');
+const { Client, GatewayIntentBits } = require('discord.js');
+const fetch = require('node-fetch');
 
-const BASE44_API_URL = 'https://api.apps/698bba4de9e06a075e7c32be6/entities/Product';
-const API_KEY = 'your_api_key_here'; // replace with your actual API key
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-async function getProducts() {
-    try {
-        const response = await axios.get(BASE44_API_URL, {
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+const BASE44_API_KEY = process.env.BASE44_API_KEY;
+
+client.once('ready', () => {
+    console.log('Ready!');
+});
+
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isCommand()) return;
+    
+    const { commandName } = interaction;
+    
+    if (commandName === 'stock') {
+        const response = await fetch('https://api.apps/698bba4de9e06a075e7c32be6/entities/Product', {
+            method: 'GET',
             headers: {
-                'api_key': API_KEY
+                'Authorization': `Bearer ${BASE44_API_KEY}`
             }
         });
-        console.log(response.data);
-        // Handle the product data as needed
-    } catch (error) {
-        console.error('Error fetching products:', error);
+        const data = await response.json();
+        await interaction.reply(`Stock: ${JSON.stringify(data)}`);
+    } else if (commandName === 'prices') {
+        const response = await fetch('https://api.apps/698bba4de9e06a075e7c32be6/entities/Product', {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${BASE44_API_KEY}`
+            }
+        });
+        const data = await response.json();
+        await interaction.reply(`Prices: ${JSON.stringify(data)}`);
     }
-}
+});
 
-// Call the function to fetch products
-getProducts();
+client.login(TOKEN);
+
+// Register Commands
+const { REST } = require('@discordjs/rest');
+const { Routes } = require('discord-api-types/v9');
+
+const commands = [
+    { name: 'stock', description: 'Get stock information' },
+    { name: 'prices', description: 'Get prices information' },
+];
+
+const rest = new REST({ version: '9' }).setToken(TOKEN);
+
+(async () => {
+    try {
+        console.log('Started refreshing application (/) commands.');
+        await rest.put(
+            Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+            { body: commands },
+        );
+        console.log('Successfully reloaded application (/) commands.');
+    } catch (error) {
+        console.error(error);
+    }
+})();
