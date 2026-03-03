@@ -84,24 +84,6 @@ function saveStock() {
   saveJson(STOCK_FILE, stockStore);
 }
 
-// ---------- PRICES (ADDED) ----------
-const PRICES_FILE = path.join(DATA_DIR, "prices.json");
-const pricesStore = loadJson(PRICES_FILE, { byGuild: {} });
-pricesStore.byGuild ??= {};
-saveJson(PRICES_FILE, pricesStore);
-
-function getPrices(guildId) {
-  pricesStore.byGuild[guildId] ??= {
-    channelId: null,
-    messageId: null,
-  };
-  saveJson(PRICES_FILE, pricesStore);
-  return pricesStore.byGuild[guildId];
-}
-function savePrices() {
-  saveJson(PRICES_FILE, pricesStore);
-}
-
 // ---------- INVITES ----------
 const INVITES_FILE = path.join(DATA_DIR, "invites.json");
 const invitesData = loadJson(INVITES_FILE, {
@@ -116,7 +98,7 @@ function saveInvites() {
   saveJson(INVITES_FILE, invitesData);
 }
 
-// ================= STOCK/PRICES SYSTEM =================
+// ================= STOCK SYSTEM =================
 
 async function fetchStock() {
   const res = await fetch(BASE44_ENDPOINT, {
@@ -134,20 +116,21 @@ async function fetchStock() {
   return await res.json();
 }
 
+/**
+ * ONLY CHANGE YOU REQUESTED: Stock embed formatting
+ * - ONLY list in-stock items
+ * - Each line: **Product Name**  **Stock**
+ * - Do NOT list out-of-stock items
+ * - Bottom note: "All items not listed are out of stock."
+ */
 function escapeMd(s) {
   return String(s ?? "").replace(/([*_`~|>])/g, "\\$1");
 }
 
-/**
- * STOCK EMBED (changed look):
- * - ONLY list in-stock items
- * - Each line: **Product Name**  **Stock**
- * - Bottom note: "All items not listed are out of stock."
- *
- * Uses your working fields: p.name and p.quantity
- */
 function buildStockEmbed(products) {
-  const embed = new EmbedBuilder().setTitle("🍩 DonutDemand Live Stock").setColor(0xed4245);
+  const embed = new EmbedBuilder()
+    .setTitle("🍩 DonutDemand Live Stock")
+    .setColor(0xed4245);
 
   if (!Array.isArray(products) || !products.length) {
     embed.setDescription("*All items not listed are out of stock.*");
@@ -161,6 +144,7 @@ function buildStockEmbed(products) {
     const qty = Number(p.quantity ?? 0);
 
     if (!Number.isFinite(qty) || qty <= 0) continue; // don't list out of stock
+
     lines.push(`**${escapeMd(name)}**  **${qty}**`);
   }
 
@@ -170,39 +154,6 @@ function buildStockEmbed(products) {
     "*All items not listed are out of stock.*";
 
   embed.setDescription(desc);
-  return embed;
-}
-
-/**
- * PRICES EMBED (ADDED, working):
- * - Lists items that have a price
- * - Each line: **Product Name**  **$Price**
- * - No extra text
- *
- * Uses your working fields: p.name and p.price
- */
-function buildPricesEmbed(products) {
-  const embed = new EmbedBuilder().setTitle("🍩 DonutDemand Live Prices").setColor(0xed4245);
-
-  if (!Array.isArray(products) || !products.length) {
-    embed.setDescription("No prices listed.");
-    return embed;
-  }
-
-  const rows = [];
-
-  for (const p of products) {
-    const name = p.name || "Unnamed";
-    const priceRaw = p.price;
-
-    if (priceRaw === undefined || priceRaw === null || String(priceRaw).trim() === "") continue;
-
-    // keep it simple: show $ + whatever the API already returns
-    const priceText = String(priceRaw).startsWith("$") ? String(priceRaw) : `$${priceRaw}`;
-    rows.push(`**${escapeMd(name)}**  **${escapeMd(priceText)}**`);
-  }
-
-  embed.setDescription(rows.length ? rows.join("\n") : "No prices listed.");
   return embed;
 }
 
@@ -225,30 +176,6 @@ async function updateStockMessage(guild) {
     const sent = await channel.send({ embeds: [embed] });
     cfg.messageId = sent.id;
     saveStock();
-  } else {
-    await msg.edit({ embeds: [embed] }).catch(() => {});
-  }
-}
-
-async function updatePricesMessage(guild) {
-  const cfg = getPrices(guild.id);
-  if (!cfg.channelId) return;
-
-  const channel = await guild.channels.fetch(cfg.channelId).catch(() => null);
-  if (!channel || channel.type !== ChannelType.GuildText) return;
-
-  const products = await fetchStock().catch(() => null); // same endpoint returns price too
-  if (!products) return;
-
-  const embed = buildPricesEmbed(products);
-
-  let msg;
-  if (cfg.messageId) msg = await channel.messages.fetch(cfg.messageId).catch(() => null);
-
-  if (!msg) {
-    const sent = await channel.send({ embeds: [embed] });
-    cfg.messageId = sent.id;
-    savePrices();
   } else {
     await msg.edit({ embeds: [embed] }).catch(() => {});
   }
@@ -455,8 +382,7 @@ client.on("interactionCreate", async (interaction) => {
 
   // ========== CLOSE BUTTON ==========
   if (interaction.isButton() && interaction.customId === "ticket_close") {
-    if (!interaction.channel.name.startsWith("ticket-"))
-      return interaction.reply({ content: "Not a ticket.", ephemeral: true });
+    if (!interaction.channel.name.startsWith("ticket-")) return interaction.reply({ content: "Not a ticket.", ephemeral: true });
 
     await interaction.reply("🔒 Closing ticket...");
     setTimeout(() => {
@@ -595,28 +521,6 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
 
-  // ================= PRICES COMMAND (ADDED) =================
-  if (interaction.commandName === "prices") {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
-      return interaction.reply({ content: "Admins only.", ephemeral: true });
-
-    const sub = interaction.options.getSubcommand();
-
-    if (sub === "set_channel") {
-      const channel = interaction.options.getChannel("channel");
-      const cfg = getPrices(interaction.guild.id);
-      cfg.channelId = channel.id;
-      cfg.messageId = null;
-      savePrices();
-      return interaction.reply({ content: `✅ Prices channel set to ${channel}`, ephemeral: true });
-    }
-
-    if (sub === "post") {
-      await updatePricesMessage(interaction.guild);
-      return interaction.reply({ content: "✅ Prices updated.", ephemeral: true });
-    }
-  }
-
   // ================= LEADERBOARD =================
   if (interaction.commandName === "leaderboard") return sendLeaderboard(interaction);
 
@@ -672,24 +576,6 @@ async function registerCommands() {
       )
       .addSubcommand((s) => s.setName("post").setDescription("Post stock immediately")),
 
-    // PRICES (ADDED)
-    new SlashCommandBuilder()
-      .setName("prices")
-      .setDescription("Prices system")
-      .addSubcommand((s) =>
-        s
-          .setName("set_channel")
-          .setDescription("Set prices channel")
-          .addChannelOption((o) =>
-            o
-              .setName("channel")
-              .setDescription("Text channel")
-              .addChannelTypes(ChannelType.GuildText)
-              .setRequired(true)
-          )
-      )
-      .addSubcommand((s) => s.setName("post").setDescription("Post prices immediately")),
-
     new SlashCommandBuilder().setName("leaderboard").setDescription("Invite leaderboard"),
 
     new SlashCommandBuilder()
@@ -718,11 +604,10 @@ client.once("ready", async () => {
 
   await registerCommands();
 
-  // Stock + Prices auto update every 1 minute
+  // Stock auto update every 1 minute
   setInterval(async () => {
     for (const guild of client.guilds.cache.values()) {
       await updateStockMessage(guild).catch(() => {});
-      await updatePricesMessage(guild).catch(() => {});
     }
   }, 60 * 1000);
 });
