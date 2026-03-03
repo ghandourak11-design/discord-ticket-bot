@@ -1,23 +1,41 @@
-const formatStockPrices = (stocks) => {
-    const border = "+-" + "-".repeat(20) + "+-" + "-".repeat(10) + "+";
-    let formattedTable = border + '\n';
-    formattedTable += '| Stock Name         | Price       |\n';
-    formattedTable += border + '\n';
+const { Client, Intents } = require('discord.js');
+const fetch = require('node-fetch');
 
-    stocks.forEach(stock => {
-        const { name, price } = stock;
-        formattedTable += `| ${name.padEnd(18)} | $${price.toFixed(2).padStart(8)} |\n`;
-    });
+const client = new Client({ intents: [Intents.FLAGS.GUILDS, Intents.FLAGS.GUILD_MESSAGES] });
+const BASE44_URL = 'https://example.com/api'; // Replace with actual BASE44_URL
 
-    formattedTable += border;
-    return formattedTable;
+const formatStockEmbed = (stockData) => {
+    // Filter and format stock data
+    const embedContent = stockData
+        .filter(item => item.stock > 0) // Hide out of stock items
+        .map(item => `┌─────┐\n│ ${item.name} │\n│ Stock: ${item.stock} │\n└─────┘`)
+        .join('\n');
+    return embedContent;
 };
 
-// Example usage:
-const stocks = [
-    { name: 'AAPL', price: 150.55 },
-    { name: 'GOOGL', price: 2800.12 },
-    { name: 'AMZN', price: 3300.99 },
-];
+const formatPricesEmbed = (pricesData) => {
+    // Format prices data
+    const embedContent = pricesData
+        .filter(item => item.price > 0) // Filter out irrelevant items
+        .map(item => `┌─────┐\n│ ${item.name} - $${item.price} │\n└─────┘`)
+        .join('\n');
+    return embedContent;
+};
 
-console.log(formatStockPrices(stocks));
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isCommand()) return;
+
+    if (interaction.commandName === 'stock') {
+        const response = await fetch(`${BASE44_URL}/stock`);
+        const stockData = await response.json();
+        const embed = formatStockEmbed(stockData);
+        await interaction.reply(embed);
+    } else if (interaction.commandName === 'prices') {
+        const response = await fetch(`${BASE44_URL}/prices`);
+        const pricesData = await response.json();
+        const embed = formatPricesEmbed(pricesData);
+        await interaction.reply(embed);
+    }
+});
+
+client.login('YOUR_BOT_TOKEN'); // Replace with your bot token
