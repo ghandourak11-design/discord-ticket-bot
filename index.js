@@ -1,21 +1,18 @@
+// Import necessary libraries
 const { Client, GatewayIntentBits } = require('discord.js');
-const { EmbedBuilder } = require('discord.js');
 
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-    ],
+// Use the TOKEN environment variable directly
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+
+client.once('ready', () => {
+    console.log(`Logged in as ${client.user.tag}!`);
 });
 
-client.on('messageCreate', (message) => {
-    if (message.content === '!embed') {
-        const embed = new EmbedBuilder()
-            .setTitle('Title')
-            .setDescription('Description');
-        message.channel.send({ embeds: [embed] });
+client.on('messageCreate', message => {
+    if (message.content === '!ping') {
+        message.channel.send('Pong!');
     }
 });
 
-client.login('YOUR_TOKEN');
+// Login to Discord with your app's token
+client.login(process.env.TOKEN);
