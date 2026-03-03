@@ -1,67 +1,38 @@
-const { Client, GatewayIntentBits, Events } = require('discord.js');
-const axios = require('axios');
+const { Client, GatewayIntentBits } = require('discord.js');
+const fetch = require('node-fetch');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-const fetchStockData = async () => {
+const updateInterval = 60000; // 60 seconds
+let stockData = {};
+let priceData = {};
+
+async function fetchData() {
     try {
-        const response = await axios.get('https://donutdemand.net/api/stock');
-        return response.data;
+        const stockResponse = await fetch('https://donutdemand.net/stock');
+        const pricesResponse = await fetch('https://donutdemand.net/prices');
+        
+        stockData = await stockResponse.json();
+        priceData = await pricesResponse.json();
+        
+        console.log("Data updated");
     } catch (error) {
-        console.error('Error fetching stock data: ', error);
-        return null;
+        console.error("Error fetching data:", error);
     }
 }
 
-const fetchPricesData = async () => {
-    try {
-        const response = await axios.get('https://donutdemand.net/api/prices');
-        return response.data;
-    } catch (error) {
-        console.error('Error fetching prices data: ', error);
-        return null;
-    }
-}
-
-client.once(Events.ClientReady, async () => {
+client.on('ready', () => {
     console.log(`Logged in as ${client.user.tag}`);
-
-    // Register commands here (only once)
-    const commands = [
-        {
-            name: 'stock',
-            description: 'Get the current stock data',
-        },
-        {
-            name: 'prices',
-            description: 'Get the current prices data',
-        },
-    ];
-
-    const data = await client.application.commands.set(commands);
-    console.log('Registered commands:', data);
-
-    // Fetch and update data every minute
-    setInterval(async () => {
-        const stockData = await fetchStockData();
-        const pricesData = await fetchPricesData();
-        // Here you can save or update this data as needed.
-    }, 60000); // 60 seconds
+    fetchData(); // Initial fetch
+    setInterval(fetchData, updateInterval); // Auto-update every 60 seconds
 });
 
-client.on(Events.InteractionCreate, async interaction => {
-    if (!interaction.isCommand()) return;
-
-    await interaction.deferReply(); // Defer the reply
-
-    if (interaction.commandName === 'stock') {
-        const stockData = await fetchStockData();
-        await interaction.editReply(`Stock data: ${JSON.stringify(stockData)}`);
-    } else if (interaction.commandName === 'prices') {
-        const pricesData = await fetchPricesData();
-        await interaction.editReply(`Prices data: ${JSON.stringify(pricesData)}`);
+client.on('messageCreate', (message) => {
+    if (message.content === '/stock') {
+        message.channel.send(`Current stock: ${JSON.stringify(stockData)}`);
+    } else if (message.content === '/prices') {
+        message.channel.send(`Current prices: ${JSON.stringify(priceData)}`);
     }
 });
 
-// Login to Discord with your client's token
-client.login('YOUR_BOT_TOKEN');
+client.login('YOUR_DISCORD_BOT_TOKEN'); // Replace with your actual token
