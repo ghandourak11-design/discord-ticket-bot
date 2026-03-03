@@ -1,55 +1,39 @@
-const Discord = require('discord.js');
-const axios = require('axios');
-const client = new Discord.Client();
+// Import necessary modules
+require('dotenv').config();
+const { Client, GatewayIntentBits } = require('discord.js');
+const fetch = require('node-fetch');
 
-const STOCK_COMMAND = '/stock';
-const PRICES_COMMAND = '/prices';
+// Create a new client instance
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
 
-let stockData = null;
-let pricesData = null;
+// Create slash command details
+const command = { 
+    name: 'ticket', 
+    description: 'Create a support ticket', 
+};
 
-async function fetchStockData() {
-    try {
-        const response = await axios.get('https://donutdemand.net/api/stock');
-        stockData = response.data;
-        console.log('Stock data updated:', stockData);
-    } catch (error) {
-        console.error('Error fetching stock data:', error);
-    }
-}
+// Log into Discord
+client.once('ready', () => {
+    console.log(`Logged in as ${client.user.tag}`);
+});
 
-async function fetchPricesData() {
-    try {
-        const response = await axios.get('https://donutdemand.net/api/prices');
-        pricesData = response.data;
-        console.log('Prices data updated:', pricesData);
-    } catch (error) {
-        console.error('Error fetching prices data:', error);
-    }
-}
+// Register the slash command
+client.on('ready', async () => {
+    const data = await client.application.commands.create(command);
+    console.log(`Registered command: ${data.name}`);
+});
 
-//Discord Command Handling
-client.on('message', async message => {
-    if (message.content === STOCK_COMMAND) {
-        if (stockData) {
-            message.reply(`Stock Data: ${JSON.stringify(stockData)}`);
-        } else {
-            message.reply('Stock data not available. Please try again later.');
-        }
-    } else if (message.content === PRICES_COMMAND) {
-        if (pricesData) {
-            message.reply(`Prices Data: ${JSON.stringify(pricesData)}`);
-        } else {
-            message.reply('Prices data not available. Please try again later.');
-        }
+// Handle the command interaction
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isCommand()) return;
+
+    const { commandName } = interaction;
+
+    if (commandName === 'ticket') {
+        await interaction.reply('Your support ticket has been created!');
+        // Here you can add code to handle ticket creation
     }
 });
 
-// Auto-update data every 60 seconds
-setInterval(() => {
-    fetchStockData();
-    fetchPricesData();
-}, 60000);
-
-// Discord Bot Login
-client.login('YOUR_BOT_TOKEN');
+// Log in the client using the token stored in environment variables
+client.login(process.env.BOT_TOKEN);
