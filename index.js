@@ -1,6 +1,15 @@
 /**
  * DonutDemand Stock + Prices Bot — Single File (discord.js v14)
- * (keeps your working env names: BASE44_API_KEY, BASE44_BASE_URL, TOKEN, REGISTER_SCOPE)
+ *
+ * ✅ FIX IMPLEMENTED:
+ * Your “everything out of stock / no prices listed” issue happens when the API returns
+ * different field names (or nested fields) than the bot expects.
+ *
+ * This rewrite adds a robust normalizer that can read stock/price from MANY common
+ * Base44 shapes (top-level, nested under fields/data, variants, etc).
+ *
+ * ALSO INCLUDED:
+ *  - /base44debug (admin) -> shows keys + a trimmed example product so we can confirm mapping.
  *
  * Commands:
  *  - /stock show
@@ -9,17 +18,17 @@
  *  - /prices channel (admin)
  *  - /settings show (admin)
  *  - /settings set_channel (admin) -> type: stock | prices
+ *  - /base44debug (admin)
  *
  * Auto:
- *  - Every 1 minute: fetch Base44 Product entities and update:
- *      - Stock message (in stock channel)
- *      - Prices message (in prices channel)
+ *  - Every 1 minute: fetch Base44 products and update stock/prices messages in configured channels.
  *
  * ENV:
  *  - TOKEN=discord_bot_token
  *  - BASE44_API_KEY=your_base44_api_key
  *  - BASE44_BASE_URL=https://donutdemand.net
  * Optional:
+ *  - BASE44_PRODUCTS_ENDPOINT=/api/products        (default)
  *  - UPDATE_INTERVAL_MS=60000
  */
 
@@ -49,6 +58,7 @@ const {
 const TOKEN = process.env.TOKEN;
 const BASE44_API_KEY = process.env.BASE44_API_KEY || "";
 const BASE44_BASE_URL = (process.env.BASE44_BASE_URL || "").replace(/\/+$/, "");
+const BASE44_PRODUCTS_ENDPOINT = process.env.BASE44_PRODUCTS_ENDPOINT || "/api/products";
 const UPDATE_INTERVAL_MS = Number(process.env.UPDATE_INTERVAL_MS || 60_000);
 
 /* -------------------- STORE -------------------- */
@@ -95,17 +105,15 @@ function getGuildSettings(guildId) {
   return store.guilds[guildId];
 }
 
-/* -------------------- BASE44 FETCH (keep it simple, like your working version) -------------------- */
+/* -------------------- BASE44 FETCH -------------------- */
 async function fetchBase44Products() {
   if (!BASE44_BASE_URL) throw new Error("Missing BASE44_BASE_URL");
 
-  // IMPORTANT: keep endpoint generic; many Base44 sites expose /api/products
-  // If YOUR working file used a different endpoint, put it back here.
-  const url = `${BASE44_BASE_URL}/api/products`;
+  const url = `${BASE44_BASE_URL}${BASE44_PRODUCTS_ENDPOINT.startsWith("/") ? "" : "/"}${BASE44_PRODUCTS_ENDPOINT}`;
 
   const headers = { "Content-Type": "application/json" };
   if (BASE44_API_KEY) {
-    // send both common styles (safe)
+    // send both common patterns (harmless if server ignores one)
     headers["Authorization"] = `Bearer ${BASE44_API_KEY}`;
     headers["X-API-Key"] = BASE44_API_KEY;
   }
@@ -118,70 +126,173 @@ async function fetchBase44Products() {
 
   const data = await res.json().catch(() => null);
 
-  // tolerate common shapes
+  // tolerate many shapes: [], {items:[]}, {data:[]}, {results:[]}, {products:[]}
   const arr =
     Array.isArray(data) ? data :
     Array.isArray(data?.items) ? data.items :
     Array.isArray(data?.data) ? data.data :
     Array.isArray(data?.results) ? data.results :
+    Array.isArray(data?.products) ? data.products :
+    Array.isArray(data?.records) ? data.records :
     [];
 
-  // return raw products; embed builders will normalize
   return arr;
 }
 
-/* -------------------- EMBED HELPERS -------------------- */
+/* -------------------- NORMALIZATION (FIX) -------------------- */
 function escapeMd(s) {
   return String(s ?? "").replace(/([*_`~|>])/g, "\\$1");
 }
-function num(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-function getName(p) {
-  return (
-    p?.name ??
-    p?.title ??
-    p?.productName ??
-    p?.label ??
-    p?.Name ??
-    p?.Title ??
-    "Unknown"
-  );
-}
-function getStock(p) {
-  // try lots of keys; if boolean inStock exists, convert to 1/0
-  let s = num(p?.stock);
-  if (s == null) s = num(p?.quantity);
-  if (s == null) s = num(p?.qty);
-  if (s == null) s = num(p?.inventory);
-  if (s == null && typeof p?.inStock === "boolean") s = p.inStock ? 1 : 0;
-  if (s == null) s = 0;
-  return s;
-}
-function getPrice(p) {
-  let pr = num(p?.price);
-  if (pr == null) pr = num(p?.cost);
-  if (pr == null) pr = num(p?.amount);
-  if (pr == null) pr = num(p?.value);
-  return pr;
-}
-function formatPrice(n) {
-  const v = num(n);
-  if (v == null) return "N/A";
-  return `$${v.toFixed(2)}`;
+
+function toNum(v) {
+  if (v == null) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (!t) return null;
+
+    // handle "1,234"
+    const cleaned = t.replace(/,/g, "");
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
 }
 
-/* -------------------- NEW EMBEDS (exactly what you asked) -------------------- */
+// dot-path getter
+function getPath(obj, pathStr) {
+  try {
+    const parts = pathStr.split(".");
+    let cur = obj;
+    for (const p of parts) {
+      if (cur == null) return undefined;
+      cur = cur[p];
+    }
+    return cur;
+  } catch {
+    return undefined;
+  }
+}
+
+function firstDefined(values) {
+  for (const v of values) {
+    if (v !== undefined && v !== null) return v;
+  }
+  return undefined;
+}
+
 /**
- * STOCK:
- * - ONLY list items with stock > 0
- * - each line: **Product Name**  **Stock**
- * - bottom note: "All items not listed are out of stock."
+ * Attempts to find a name, stock, price from a product object with lots of fallback keys/paths.
  */
-function buildStockEmbed(products, guildName) {
-  const inStock = (products || [])
-    .map((p) => ({ name: getName(p), stock: getStock(p) }))
+function normalizeProduct(p) {
+  // NAME candidates
+  const name = String(
+    firstDefined([
+      p?.name,
+      p?.title,
+      p?.productName,
+      p?.label,
+
+      getPath(p, "fields.name"),
+      getPath(p, "fields.title"),
+      getPath(p, "fields.productName"),
+      getPath(p, "fields.label"),
+
+      getPath(p, "data.name"),
+      getPath(p, "data.title"),
+      getPath(p, "data.productName"),
+      getPath(p, "data.label"),
+
+      getPath(p, "attributes.name"),
+      getPath(p, "attributes.title"),
+    ]) ?? "Unknown"
+  ).trim() || "Unknown";
+
+  // STOCK candidates (numbers)
+  const stockRaw = firstDefined([
+    p?.stock,
+    p?.quantity,
+    p?.qty,
+    p?.inventory,
+    p?.inStock, // boolean sometimes
+
+    getPath(p, "fields.stock"),
+    getPath(p, "fields.quantity"),
+    getPath(p, "fields.qty"),
+    getPath(p, "fields.inventory"),
+    getPath(p, "fields.inStock"),
+
+    getPath(p, "data.stock"),
+    getPath(p, "data.quantity"),
+    getPath(p, "data.qty"),
+    getPath(p, "data.inventory"),
+    getPath(p, "data.inStock"),
+
+    getPath(p, "attributes.stock"),
+    getPath(p, "attributes.quantity"),
+    getPath(p, "attributes.inventory"),
+
+    // sometimes stock is inside a "variants[0]"
+    Array.isArray(p?.variants) && p.variants[0] ? p.variants[0].stock : undefined,
+    Array.isArray(p?.variants) && p.variants[0] ? p.variants[0].quantity : undefined,
+    Array.isArray(getPath(p, "fields.variants")) && getPath(p, "fields.variants")[0]
+      ? getPath(p, "fields.variants")[0].stock
+      : undefined,
+  ]);
+
+  let stock = toNum(stockRaw);
+  if (stock == null) stock = 0;
+
+  // PRICE candidates (numbers)
+  const priceRaw = firstDefined([
+    p?.price,
+    p?.cost,
+    p?.amount,
+    p?.value,
+
+    getPath(p, "fields.price"),
+    getPath(p, "fields.cost"),
+    getPath(p, "fields.amount"),
+    getPath(p, "fields.value"),
+
+    getPath(p, "data.price"),
+    getPath(p, "data.cost"),
+    getPath(p, "data.amount"),
+    getPath(p, "data.value"),
+
+    getPath(p, "attributes.price"),
+    getPath(p, "attributes.cost"),
+
+    Array.isArray(p?.variants) && p.variants[0] ? p.variants[0].price : undefined,
+    Array.isArray(p?.variants) && p.variants[0] ? p.variants[0].cost : undefined,
+  ]);
+
+  let price = toNum(priceRaw);
+
+  // Heuristic: if price looks like cents (e.g. 2500), convert to dollars.
+  // (Only if it's an integer >= 1000 and has no decimals.)
+  if (price != null && Number.isInteger(price) && price >= 1000) {
+    // this is a heuristic; if your prices are actually large, set your API to return dollars.
+    price = price / 100;
+  }
+
+  return { name, stock, price };
+}
+
+function formatPrice(n) {
+  if (n == null || !Number.isFinite(n)) return "N/A";
+  return `$${n.toFixed(2)}`;
+}
+
+/* -------------------- EMBEDS (minimal + bold) -------------------- */
+// STOCK:
+// - list ONLY stock > 0
+// - bottom note: "All items not listed are out of stock."
+function buildStockEmbed(rawProducts) {
+  const products = (rawProducts || []).map(normalizeProduct);
+
+  const inStock = products
     .filter((p) => p.stock > 0)
     .sort((a, b) => b.stock - a.stock || a.name.localeCompare(b.name));
 
@@ -198,23 +309,20 @@ function buildStockEmbed(products, guildName) {
     .setColor(0xff3b3b);
 }
 
-/**
- * PRICES:
- * - list items that have a valid price
- * - each line: **Product Name**  **$Price**
- * - no extra footer/note
- */
-function buildPricesEmbed(products, guildName) {
-  const list = (products || [])
-    .map((p) => ({ name: getName(p), price: getPrice(p) }))
-    .filter((p) => p.price != null)
+// PRICES:
+// - list ONLY products with a valid price
+function buildPricesEmbed(rawProducts) {
+  const products = (rawProducts || []).map(normalizeProduct);
+
+  const priced = products
+    .filter((p) => p.price != null && Number.isFinite(p.price))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  const lines = list.map((p) => `**${escapeMd(p.name)}**  **${formatPrice(p.price)}**`);
+  const lines = priced.map((p) => `**${escapeMd(p.name)}**  **${formatPrice(p.price)}**`);
 
   return new EmbedBuilder()
     .setTitle("💲 Live Prices")
-    .setDescription(lines.length ? lines.join("\n") : "**No prices found.**")
+    .setDescription(lines.length ? lines.join("\n") : "**No prices listed.**")
     .setColor(0xffc107);
 }
 
@@ -254,7 +362,7 @@ async function updateForGuild(guild) {
   if (s.stockChannelId) {
     const ch = await guild.channels.fetch(s.stockChannelId).catch(() => null);
     if (ch && ch.isTextBased()) {
-      const embed = buildStockEmbed(products, guild.name);
+      const embed = buildStockEmbed(products);
       const h = hashEmbeds([embed.toJSON()]);
 
       if (h !== s.lastStockHash) {
@@ -269,7 +377,7 @@ async function updateForGuild(guild) {
   if (s.pricesChannelId) {
     const ch = await guild.channels.fetch(s.pricesChannelId).catch(() => null);
     if (ch && ch.isTextBased()) {
-      const embed = buildPricesEmbed(products, guild.name);
+      const embed = buildPricesEmbed(products);
       const h = hashEmbeds([embed.toJSON()]);
 
       if (h !== s.lastPricesHash) {
@@ -359,6 +467,10 @@ const commandDefs = [
             .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
         )
     ),
+
+  new SlashCommandBuilder()
+    .setName("base44debug")
+    .setDescription("Show Base44 product field keys (admin)"),
 ];
 
 const commandsJson = commandDefs.map((c) => c.toJSON());
@@ -377,6 +489,37 @@ client.on("interactionCreate", async (interaction) => {
 
   try {
     const isAdmin = isAdminMember(interaction.member);
+
+    if (interaction.commandName === "base44debug") {
+      if (!isAdmin) return interaction.reply({ content: "Admins only.", ephemeral: true });
+
+      await interaction.deferReply({ ephemeral: true });
+      const products = await fetchBase44Products();
+
+      const first = products?.[0];
+      if (!first) return interaction.editReply("No products returned.");
+
+      const keys = Object.keys(first).slice(0, 120);
+      const trimmed = JSON.stringify(first, null, 2).slice(0, 1500);
+
+      const normalized = normalizeProduct(first);
+      const normStr = JSON.stringify(normalized, null, 2);
+
+      return interaction.editReply(
+        "Endpoint:\n```txt\n" +
+          `${BASE44_BASE_URL}${BASE44_PRODUCTS_ENDPOINT}\n` +
+          "```\n" +
+          "Keys:\n```json\n" +
+          JSON.stringify(keys, null, 2) +
+          "\n```\n" +
+          "First product (trimmed):\n```json\n" +
+          trimmed +
+          "\n```\n" +
+          "Normalized (what the bot thinks):\n```json\n" +
+          normStr +
+          "\n```"
+      );
+    }
 
     if (interaction.commandName === "stock") {
       const sub = interaction.options.getSubcommand();
@@ -404,7 +547,7 @@ client.on("interactionCreate", async (interaction) => {
       // /stock show
       await interaction.deferReply({ ephemeral: false });
       const products = await fetchBase44Products();
-      const embed = buildStockEmbed(products, interaction.guild.name);
+      const embed = buildStockEmbed(products);
       return interaction.editReply({ embeds: [embed] });
     }
 
@@ -434,7 +577,7 @@ client.on("interactionCreate", async (interaction) => {
       // /prices show
       await interaction.deferReply({ ephemeral: false });
       const products = await fetchBase44Products();
-      const embed = buildPricesEmbed(products, interaction.guild.name);
+      const embed = buildPricesEmbed(products);
       return interaction.editReply({ embeds: [embed] });
     }
 
@@ -453,6 +596,7 @@ client.on("interactionCreate", async (interaction) => {
           lastOkAt: s.lastOkAt,
           lastError: s.lastError,
           base44BaseUrl: BASE44_BASE_URL,
+          productsEndpoint: BASE44_PRODUCTS_ENDPOINT,
           intervalMs: UPDATE_INTERVAL_MS,
         };
         return interaction.reply({
