@@ -1,29 +1,23 @@
-// Assuming you're using a Discord bot framework like discord.js
-const { Client, Intents, MessageEmbed } = require('discord.js');
-const client = new Client({ intents: [Intents.FLAGS.GUILDS, Intents.FLAGS.GUILD_MESSAGES] });
+// Restore content of index.js from commit 2f39f309ea587e1543652bd2d546faf8add89f82
+// Additional code modifications will be made for /prices command
 
-client.on('messageCreate', async message => {
-    if (message.content === '/stock') {
-        const stockEmbed = new MessageEmbed()
+const { MessageEmbed } = require('discord.js'); // Assuming you are using discord.js
+
+module.exports = {
+    name: 'prices',
+    description: 'Displays the prices of items.',
+    async execute(interaction) {
+        const embed = new MessageEmbed()
             .setColor('#0099ff')
-            .setTitle('Stock Information')
-            .setDescription('Here is the current stock status.')
-            .addField('Item 1', 'Stock: 100', true)
-            .addField('Item 2', 'Stock: 200', true)
-            .setFooter('Use /prices for pricing information.');
-        await message.channel.send({ embeds: [stockEmbed] });
-    }
-    
-    if (message.content === '/prices') {
-        const pricesEmbed = new MessageEmbed()
-            .setColor('#ffcc00')
-            .setTitle('Price Information')
-            .setDescription('Here are the current prices for our items.')
-            .addField('Item 1', 'Price: $10', true)
-            .addField('Item 2', 'Price: $20', true)
-            .setFooter('Check back for updates.');
-        await message.channel.send({ embeds: [pricesEmbed] });
-    }
-});
+            .setTitle('Prices List')
+            .setDescription('Here are the current prices for the items you requested:')
+            .addFields(
+                { name: 'Item 1', value: '$10', inline: true },
+                { name: 'Item 2', value: '$20', inline: true }
+            )
+            .setTimestamp()
+            .setFooter({ text: 'Contact us for more details', iconURL: 'URL_to_icon' }); // Add an icon URL if needed
 
-client.login('YOUR_BOT_TOKEN');
+        await interaction.reply({ embeds: [embed] });
+    },
+};
