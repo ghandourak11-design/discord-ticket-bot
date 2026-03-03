@@ -1,41 +1,53 @@
-const { Client, Intents } = require('discord.js');
-const fetch = require('node-fetch');
+// Complete bot code for Discord ticket bot
 
-const client = new Client({ intents: [Intents.FLAGS.GUILDS, Intents.FLAGS.GUILD_MESSAGES] });
-const BASE44_URL = 'https://example.com/api'; // Replace with actual BASE44_URL
+const { Client, GatewayIntentBits } = require('discord.js');
+const axios = require('axios');
 
-const formatStockEmbed = (stockData) => {
-    // Filter and format stock data
-    const embedContent = stockData
-        .filter(item => item.stock > 0) // Hide out of stock items
-        .map(item => `┌─────┐\n│ ${item.name} │\n│ Stock: ${item.stock} │\n└─────┘`)
-        .join('\n');
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const BASE44_URL = 'https://example.com/api'; // Change to your actual endpoint
+
+// Format stock embed with proper ASCII borders
+function formatStockEmbed(stockData) {
+    let embedContent = '```
+Stock Items:
+```
+';
+    stockData.forEach(item => {
+        if (item.inStock) {
+            embedContent += `• ${item.name}: ${item.price} (Quantity: ${item.quantity})\n`;
+        }
+    });
     return embedContent;
-};
+}
 
-const formatPricesEmbed = (pricesData) => {
-    // Format prices data
-    const embedContent = pricesData
-        .filter(item => item.price > 0) // Filter out irrelevant items
-        .map(item => `┌─────┐\n│ ${item.name} - $${item.price} │\n└─────┘`)
-        .join('\n');
+// Format prices embed with proper ASCII borders
+function formatPricesEmbed(pricesData) {
+    let embedContent = '```
+Current Prices:
+```
+';
+    pricesData.forEach(item => {
+        embedContent += `• ${item.name}: ${item.currentPrice}\n`;
+    });
     return embedContent;
-};
+}
 
-client.on('interactionCreate', async (interaction) => {
+client.on('ready', () => {
+    console.log(`Bot is ready! Logged in as ${client.user.tag}`);
+});
+
+client.on('interactionCreate', async interaction => {
     if (!interaction.isCommand()) return;
 
     if (interaction.commandName === 'stock') {
-        const response = await fetch(`${BASE44_URL}/stock`);
-        const stockData = await response.json();
-        const embed = formatStockEmbed(stockData);
-        await interaction.reply(embed);
+        const response = await axios.get(`${BASE44_URL}/stock`);
+        const stockEmbed = formatStockEmbed(response.data);
+        await interaction.reply(stockEmbed);
     } else if (interaction.commandName === 'prices') {
-        const response = await fetch(`${BASE44_URL}/prices`);
-        const pricesData = await response.json();
-        const embed = formatPricesEmbed(pricesData);
-        await interaction.reply(embed);
+        const response = await axios.get(`${BASE44_URL}/prices`);
+        const pricesEmbed = formatPricesEmbed(response.data);
+        await interaction.reply(pricesEmbed);
     }
 });
 
-client.login('YOUR_BOT_TOKEN'); // Replace with your bot token
+client.login('YOUR_BOT_TOKEN'); // Add actual token here
