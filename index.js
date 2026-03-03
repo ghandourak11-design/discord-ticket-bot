@@ -1,65 +1,25 @@
-const { Client, GatewayIntentBits } = require('discord.js');
-const fetch = require('node-fetch');
+// index.js
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const fetch = require('node-fetch'); // Make sure to install node-fetch if you haven't already
+const BASE44_API_URL = 'https://your-base44-api-endpoint';
 
-const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
-const BASE44_API_KEY = process.env.BASE44_API_KEY;
+const client = new (require('discord.js')).Client();
 
-client.once('ready', () => {
-    console.log('Ready!');
+client.on('ready', () => {
+  console.log(`Logged in as ${client.user.tag}!`);
 });
 
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isCommand()) return;
-    
-    const { commandName } = interaction;
-    
-    if (commandName === 'stock') {
-        const response = await fetch('https://api.apps/698bba4de9e06a075e7c32be6/entities/Product', {
-            method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${BASE44_API_KEY}`
-            }
-        });
-        const data = await response.json();
-        await interaction.reply(`Stock: ${JSON.stringify(data)}`);
-    } else if (commandName === 'prices') {
-        const response = await fetch('https://api.apps/698bba4de9e06a075e7c32be6/entities/Product', {
-            method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${BASE44_API_KEY}`
-            }
-        });
-        const data = await response.json();
-        await interaction.reply(`Prices: ${JSON.stringify(data)}`);
-    }
-});
-
-client.login(TOKEN);
-
-// Register Commands
-const { REST } = require('@discordjs/rest');
-const { Routes } = require('discord-api-types/v9');
-
-const commands = [
-    { name: 'stock', description: 'Get stock information' },
-    { name: 'prices', description: 'Get prices information' },
-];
-
-const rest = new REST({ version: '9' }).setToken(TOKEN);
-
-(async () => {
+client.on('messageCreate', async message => {
+  if (message.content.startsWith('!fetchData')) {
     try {
-        console.log('Started refreshing application (/) commands.');
-        await rest.put(
-            Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-            { body: commands },
-        );
-        console.log('Successfully reloaded application (/) commands.');
+      const response = await fetch(BASE44_API_URL);
+      const data = await response.json();
+      message.channel.send(`Fetched data: ${JSON.stringify(data)}`);
     } catch (error) {
-        console.error(error);
+      console.error('Error fetching data:', error);
+      message.channel.send('Failed to fetch data.');
     }
-})();
+  }
+});
+
+client.login('YOUR_DISCORD_BOT_TOKEN'); // Replace with your Discord bot token
