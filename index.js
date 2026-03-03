@@ -1,101 +1,22 @@
-const { Client, GatewayIntentBits, Events, EmbedBuilder, REST, Routes } = require('discord.js');
+// Base44 API integration
+const axios = require('axios');
 
-const TOKEN = process.env.TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID;
+const BASE44_API_URL = 'https://api.apps/698bba4de9e06a075e7c32be6/entities/Product';
+const API_KEY = 'your_api_key_here'; // replace with your actual API key
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-let stockData = {};
-let pricesData = {};
-
-async function fetchStockData() {
+async function getProducts() {
     try {
-        const res = await fetch('https://donutdemand.net/api/stock');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        stockData = await res.json();
-        console.log('✅ Stock updated');
-    } catch (e) {
-        console.error('Stock error:', e.message);
-    }
-}
-
-async function fetchPricesData() {
-    try {
-        const res = await fetch('https://donutdemand.net/api/prices');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        pricesData = await res.json();
-        console.log('✅ Prices updated');
-    } catch (e) {
-        console.error('Prices error:', e.message);
-    }
-}
-
-client.once(Events.ClientReady, async () => {
-    console.log(`✅ Bot ready as ${client.user.tag}`);
-    
-    try {
-        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-            body: [
-                { name: 'stock', description: 'Show current stock' },
-                { name: 'prices', description: 'Show current prices' },
-            ],
+        const response = await axios.get(BASE44_API_URL, {
+            headers: {
+                'api_key': API_KEY
+            }
         });
-        console.log('✅ Commands registered');
-    } catch (e) {
-        console.error('Error registering commands:', e);
+        console.log(response.data);
+        // Handle the product data as needed
+    } catch (error) {
+        console.error('Error fetching products:', error);
     }
+}
 
-    await fetchStockData();
-    await fetchPricesData();
-    
-    setInterval(async () => {
-        await fetchStockData();
-        await fetchPricesData();
-    }, 60000);
-});
-
-client.on(Events.InteractionCreate, async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-    await interaction.deferReply();
-
-    try {
-        if (interaction.commandName === 'stock') {
-            const embed = new EmbedBuilder()
-                .setColor(0x0099ff)
-                .setTitle('📦 Stock')
-                .setTimestamp();
-            
-            if (stockData && Object.keys(stockData).length > 0) {
-                for (const [item, qty] of Object.entries(stockData)) {
-                    embed.addFields({ name: item, value: String(qty), inline: true });
-                }
-            } else {
-                embed.addFields({ name: 'Status', value: 'No data' });
-            }
-            
-            await interaction.editReply({ embeds: [embed] });
-        } else if (interaction.commandName === 'prices') {
-            const embed = new EmbedBuilder()
-                .setColor(0xff6633)
-                .setTitle('💰 Prices')
-                .setTimestamp();
-            
-            if (pricesData && Object.keys(pricesData).length > 0) {
-                for (const [item, price] of Object.entries(pricesData)) {
-                    embed.addFields({ name: item, value: `$${price}`, inline: true });
-                }
-            } else {
-                embed.addFields({ name: 'Status', value: 'No data' });
-            }
-            
-            await interaction.editReply({ embeds: [embed] });
-        }
-    } catch (e) {
-        await interaction.editReply('❌ Error');
-        console.error(e);
-    }
-});
-
-client.login(TOKEN);
+// Call the function to fetch products
+getProducts();
