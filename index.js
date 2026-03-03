@@ -1,39 +1,101 @@
-// Import necessary modules
-require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
-const fetch = require('node-fetch');
+const { Client, GatewayIntentBits, Events, EmbedBuilder, REST, Routes } = require('discord.js');
 
-// Create a new client instance
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
 
-// Create slash command details
-const command = { 
-    name: 'ticket', 
-    description: 'Create a support ticket', 
-};
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// Log into Discord
-client.once('ready', () => {
-    console.log(`Logged in as ${client.user.tag}`);
+let stockData = {};
+let pricesData = {};
+
+async function fetchStockData() {
+    try {
+        const res = await fetch('https://donutdemand.net/api/stock');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        stockData = await res.json();
+        console.log('✅ Stock updated');
+    } catch (e) {
+        console.error('Stock error:', e.message);
+    }
+}
+
+async function fetchPricesData() {
+    try {
+        const res = await fetch('https://donutdemand.net/api/prices');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        pricesData = await res.json();
+        console.log('✅ Prices updated');
+    } catch (e) {
+        console.error('Prices error:', e.message);
+    }
+}
+
+client.once(Events.ClientReady, async () => {
+    console.log(`✅ Bot ready as ${client.user.tag}`);
+    
+    try {
+        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+            body: [
+                { name: 'stock', description: 'Show current stock' },
+                { name: 'prices', description: 'Show current prices' },
+            ],
+        });
+        console.log('✅ Commands registered');
+    } catch (e) {
+        console.error('Error registering commands:', e);
+    }
+
+    await fetchStockData();
+    await fetchPricesData();
+    
+    setInterval(async () => {
+        await fetchStockData();
+        await fetchPricesData();
+    }, 60000);
 });
 
-// Register the slash command
-client.on('ready', async () => {
-    const data = await client.application.commands.create(command);
-    console.log(`Registered command: ${data.name}`);
-});
+client.on(Events.InteractionCreate, async interaction => {
+    if (!interaction.isChatInputCommand()) return;
+    await interaction.deferReply();
 
-// Handle the command interaction
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isCommand()) return;
-
-    const { commandName } = interaction;
-
-    if (commandName === 'ticket') {
-        await interaction.reply('Your support ticket has been created!');
-        // Here you can add code to handle ticket creation
+    try {
+        if (interaction.commandName === 'stock') {
+            const embed = new EmbedBuilder()
+                .setColor(0x0099ff)
+                .setTitle('📦 Stock')
+                .setTimestamp();
+            
+            if (stockData && Object.keys(stockData).length > 0) {
+                for (const [item, qty] of Object.entries(stockData)) {
+                    embed.addFields({ name: item, value: String(qty), inline: true });
+                }
+            } else {
+                embed.addFields({ name: 'Status', value: 'No data' });
+            }
+            
+            await interaction.editReply({ embeds: [embed] });
+        } else if (interaction.commandName === 'prices') {
+            const embed = new EmbedBuilder()
+                .setColor(0xff6633)
+                .setTitle('💰 Prices')
+                .setTimestamp();
+            
+            if (pricesData && Object.keys(pricesData).length > 0) {
+                for (const [item, price] of Object.entries(pricesData)) {
+                    embed.addFields({ name: item, value: `$${price}`, inline: true });
+                }
+            } else {
+                embed.addFields({ name: 'Status', value: 'No data' });
+            }
+            
+            await interaction.editReply({ embeds: [embed] });
+        }
+    } catch (e) {
+        await interaction.editReply('❌ Error');
+        console.error(e);
     }
 });
 
-// Log in the client using the token stored in environment variables
-client.login(process.env.BOT_TOKEN);
+client.login(TOKEN);
