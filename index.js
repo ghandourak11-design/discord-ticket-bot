@@ -38,6 +38,10 @@ function saveConfig(data) {
 
 const commands = [
     new SlashCommandBuilder()
+        .setName('help')
+        .setDescription('Show all available bot commands'),
+
+    new SlashCommandBuilder()
         .setName('settings')
         .setDescription('Configure bot settings')
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
@@ -143,6 +147,36 @@ client.once('ready', () => {
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
+
+    // /help
+    if (interaction.commandName === 'help') {
+        const helpEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📋 Bot Commands')
+            .setDescription('Here is a list of all available commands:')
+            .addFields(
+                {
+                    name: '`/help`',
+                    value: 'Show this command list.',
+                    inline: false,
+                },
+                {
+                    name: '`/settings channel <#channel>`',
+                    value: 'Set the channel where restock notifications are sent.\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/restock product:<name> quantity:<n>`',
+                    value: 'Send a restock notification embed to the configured channel.\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+            )
+            .setFooter({ text: 'Use /settings channel first before running /restock.' })
+            .setTimestamp();
+
+        await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
+        return;
+    }
 
     // /settings channel
     if (
