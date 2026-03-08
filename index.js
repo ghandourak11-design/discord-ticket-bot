@@ -89,6 +89,17 @@ const commands = [
                 .setRequired(true)
                 .setMinValue(1),
         ),
+
+    new SlashCommandBuilder()
+        .setName('announce')
+        .setDescription('Send an announcement DM to every member in the server')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt
+                .setName('message')
+                .setDescription('The announcement message to send')
+                .setRequired(true),
+        ),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -120,6 +131,7 @@ const STOCK_API_URL =
     'https://app.base44.com/api/apps/698bba4e9e06a075e7c32be6/entities/Product';
 
 const SHOW_STOCK_BUTTON_ID = 'show_current_stock';
+const ORDER_NOW_BUTTON_ID = 'order_now';
 
 function fetchCurrentStock() {
     return new Promise((resolve, reject) => {
@@ -182,19 +194,26 @@ function buildRestockEmbed(product, quantity) {
         .setTimestamp(now);
 }
 
-function buildShowStockButton() {
+function buildActionButtons() {
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder()
             .setCustomId(SHOW_STOCK_BUTTON_ID)
             .setLabel('Show Current Stock')
             .setStyle(ButtonStyle.Primary)
             .setEmoji('📦'),
+        new ButtonBuilder()
+            .setCustomId(ORDER_NOW_BUTTON_ID)
+            .setLabel('Order Now')
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('🛒'),
     );
 }
 
 // ─── Discord client ───────────────────────────────────────────────────────────
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+});
 
 client.once('ready', () => {
     console.log(`Bot is ready! Logged in as ${client.user.tag}`);
@@ -235,7 +254,24 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
-        const stockLines = products
+        const inStockProducts = products.filter(p => {
+            const qty = p.quantity ?? p.stock ?? p.qty;
+            return typeof qty === 'number' ? qty > 0 : true;
+        });
+
+        if (inStockProducts.length === 0) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('📦 Current Stock')
+                        .setDescription('No items are currently in stock.'),
+                ],
+            });
+            return;
+        }
+
+        const stockLines = inStockProducts
             .map(p => {
                 const name = p.name || p.title || p.product_name || 'Unknown Product';
                 const qty = p.quantity ?? p.stock ?? p.qty ?? '—';
@@ -257,6 +293,35 @@ client.on('interactionCreate', async interaction => {
                         .setColor(0x57F287)
                         .setTitle('✅ Stock List Sent')
                         .setDescription('Check your DMs for the current stock list!'),
+                ],
+            });
+        } catch {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Could Not Send DM')
+                        .setDescription(
+                            'I was unable to DM you. Please enable DMs from server members and try again.',
+                        ),
+                ],
+            });
+        }
+        return;
+    }
+
+    // ── Button: Order Now ────────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === ORDER_NOW_BUTTON_ID) {
+        await interaction.deferReply({ ephemeral: true });
+
+        try {
+            await interaction.user.send('Order at https://donutdemand.net');
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('✅ Order Link Sent')
+                        .setDescription('Check your DMs for the order link!'),
                 ],
             });
         } catch {
@@ -301,6 +366,11 @@ client.on('interactionCreate', async interaction => {
                 {
                     name: '`/restock product:<name> quantity:<n>`',
                     value: 'Send a restock notification embed to the configured channel.\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/announce message:<text>`',
+                    value: 'Send an announcement DM to every member in the server.\n🔒 Requires **Administrator** permission.',
                     inline: false,
                 },
             )
@@ -399,7 +469,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         const embed = buildRestockEmbed(product, quantity);
-        const row = buildShowStockButton();
+        const row = buildActionButtons();
 
         const roleId = config.notificationRoleId;
         const content = roleId ? `<@&${roleId}>` : undefined;
@@ -414,6 +484,62 @@ client.on('interactionCreate', async interaction => {
                     .setDescription(`Notification sent to <#${channelId}>.`),
             ],
             ephemeral: true,
+        });
+    }
+
+    // /announce
+    if (interaction.commandName === 'announce') {
+        const message = interaction.options.getString('message');
+
+        await interaction.deferReply({ ephemeral: true });
+
+        let members;
+        try {
+            members = await interaction.guild.members.fetch();
+        } catch (err) {
+            console.error('Failed to fetch guild members:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Failed to Fetch Members')
+                        .setDescription('Could not retrieve server members. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        const announceEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📢 Server Announcement')
+            .setDescription(message)
+            .setFooter({ text: `From ${interaction.guild.name}` })
+            .setTimestamp();
+
+        let sent = 0;
+        let failed = 0;
+
+        const humanMembers = [...members.values()].filter(m => !m.user.bot);
+        const results = await Promise.allSettled(
+            humanMembers.map(member => member.user.send({ embeds: [announceEmbed] })),
+        );
+        for (const result of results) {
+            if (result.status === 'fulfilled') {
+                sent++;
+            } else {
+                failed++;
+            }
+        }
+
+        await interaction.editReply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Announcement Sent')
+                    .setDescription(
+                        `Announcement delivered to **${sent}** member${sent !== 1 ? 's' : ''}${failed > 0 ? ` (${failed} could not be reached)` : ''}.`,
+                    ),
+            ],
         });
     }
 });
