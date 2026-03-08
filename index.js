@@ -10,6 +10,8 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
+    StringSelectMenuBuilder,
+    StringSelectMenuOptionBuilder,
     PermissionFlagsBits,
     REST,
     Routes,
@@ -106,6 +108,18 @@ const commands = [
                 .setDescription('Only DM members who have this role (omit to send to all members)')
                 .setRequired(false),
         ),
+
+    new SlashCommandBuilder()
+        .setName('updatestock')
+        .setDescription('Update the stock quantity for a product')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addIntegerOption(opt =>
+            opt
+                .setName('quantity')
+                .setDescription('The new stock quantity to set')
+                .setRequired(true)
+                .setMinValue(0),
+        ),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -138,6 +152,8 @@ const STOCK_API_URL =
 
 const SHOW_STOCK_BUTTON_ID = 'show_current_stock';
 const ORDER_NOW_BUTTON_ID = 'order_now';
+const UPDATESTOCK_SELECT_PREFIX = 'updatestock_select:';
+const VALUE_SEPARATOR = '::::';
 
 function fetchCurrentStock() {
     return new Promise((resolve, reject) => {
@@ -161,6 +177,46 @@ function fetchCurrentStock() {
                 });
             })
             .on('error', reject);
+    });
+}
+
+function updateProductStock(productId, quantity) {
+    return new Promise((resolve, reject) => {
+        const apiUrl = new URL(`${STOCK_API_URL}/${encodeURIComponent(productId)}`);
+        const body = JSON.stringify({ quantity });
+
+        const options = {
+            hostname: apiUrl.hostname,
+            path: apiUrl.pathname,
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(body),
+            },
+        };
+
+        const req = https.request(options, res => {
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                res.resume();
+                reject(new Error(`Update API returned status ${res.statusCode}`));
+                return;
+            }
+            let data = '';
+            res.on('data', chunk => {
+                data += chunk;
+            });
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch {
+                    resolve({});
+                }
+            });
+        });
+
+        req.on('error', reject);
+        req.write(body);
+        req.end();
     });
 }
 
@@ -345,6 +401,56 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // ── Select Menu: Update Stock ────────────────────────────────────────────
+    if (
+        interaction.isStringSelectMenu() &&
+        interaction.customId.startsWith(UPDATESTOCK_SELECT_PREFIX)
+    ) {
+        await interaction.deferReply({ ephemeral: true });
+
+        const quantityStr = interaction.customId.slice(UPDATESTOCK_SELECT_PREFIX.length);
+        const quantity = parseInt(quantityStr, 10);
+        const selectedValue = interaction.values[0];
+
+        // Value is encoded as "<productId><VALUE_SEPARATOR><productName>" – split on first occurrence
+        const separatorIdx = selectedValue.indexOf(VALUE_SEPARATOR);
+        const productId = separatorIdx !== -1
+            ? selectedValue.slice(0, separatorIdx)
+            : selectedValue;
+        const productName = separatorIdx !== -1
+            ? selectedValue.slice(separatorIdx + VALUE_SEPARATOR.length)
+            : selectedValue;
+
+        try {
+            await updateProductStock(productId, quantity);
+        } catch (err) {
+            console.error('Update stock API error:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Update Failed')
+                        .setDescription(
+                            'Could not update the stock. Please try again later.',
+                        ),
+                ],
+            });
+            return;
+        }
+
+        await interaction.editReply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Stock Updated')
+                    .setDescription(
+                        `**${productName}** stock has been set to **${quantity}** unit${quantity !== 1 ? 's' : ''}.`,
+                    ),
+            ],
+        });
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     // /help
@@ -377,6 +483,11 @@ client.on('interactionCreate', async interaction => {
                 {
                     name: '`/announce message:<text> [role:<@role>]`',
                     value: 'Send an announcement DM to all members, or only to members with a specific role.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/updatestock quantity:<n>`',
+                    value: 'Select a product from a dropdown and set its stock to a new quantity.\n🔒 Requires **Administrator** permission.',
                     inline: false,
                 },
             )
@@ -595,6 +706,81 @@ client.on('interactionCreate', async interaction => {
                         `Announcement delivered to **${sent}** member${sent !== 1 ? 's' : ''}${failed > 0 ? ` (${failed} could not be reached)` : ''}.`,
                     ),
             ],
+        });
+    }
+
+    // /updatestock
+    if (interaction.commandName === 'updatestock') {
+        const quantity = interaction.options.getInteger('quantity');
+
+        await interaction.deferReply({ ephemeral: true });
+
+        let products;
+        try {
+            products = await fetchCurrentStock();
+        } catch (err) {
+            console.error('Stock API error:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ API Unreachable')
+                        .setDescription(
+                            'Could not fetch products from the inventory. Please try again later.',
+                        ),
+                ],
+            });
+            return;
+        }
+
+        if (!Array.isArray(products) || products.length === 0) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('📦 No Products Found')
+                        .setDescription('No products were found in the inventory.'),
+                ],
+            });
+            return;
+        }
+
+        // Discord select menus support at most 25 options
+        const productSlice = products.slice(0, 25);
+
+        const options = productSlice.map(p => {
+            const name = p.name || p.title || p.product_name || 'Unknown Product';
+            const id = String(p._id || p.id || name);
+            const label = name.length > 100 ? name.slice(0, 100) : name;
+            // Encode as "<id><VALUE_SEPARATOR><name>". Ensure the ID and separator are
+            // never truncated by trimming only the name portion to stay within 100 chars.
+            const maxNameLen = 100 - id.length - VALUE_SEPARATOR.length;
+            const value = maxNameLen > 0
+                ? `${id}${VALUE_SEPARATOR}${name.slice(0, maxNameLen)}`
+                : id.slice(0, 100);
+            return new StringSelectMenuOptionBuilder()
+                .setLabel(label)
+                .setValue(value);
+        });
+
+        const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId(`${UPDATESTOCK_SELECT_PREFIX}${quantity}`)
+            .setPlaceholder('Select a product to update…')
+            .addOptions(options);
+
+        const row = new ActionRowBuilder().addComponents(selectMenu);
+
+        await interaction.editReply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x5865F2)
+                    .setTitle('📦 Update Stock')
+                    .setDescription(
+                        `Select a product below to set its stock to **${quantity}** unit${quantity !== 1 ? 's' : ''}.` +
+                        (products.length > 25 ? `\n\n⚠️ Only the first 25 of ${products.length} products are shown.` : ''),
+                    ),
+            ],
+            components: [row],
         });
     }
 });
