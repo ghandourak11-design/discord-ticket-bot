@@ -92,13 +92,19 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('announce')
-        .setDescription('Send an announcement DM to every member in the server')
+        .setDescription('Send an announcement DM to server members')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .addStringOption(opt =>
             opt
                 .setName('message')
                 .setDescription('The announcement message to send')
                 .setRequired(true),
+        )
+        .addRoleOption(opt =>
+            opt
+                .setName('role')
+                .setDescription('Only DM members who have this role (omit to send to all members)')
+                .setRequired(false),
         ),
 ].map(cmd => cmd.toJSON());
 
@@ -369,8 +375,8 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
-                    name: '`/announce message:<text>`',
-                    value: 'Send an announcement DM to every member in the server.\n🔒 Requires **Administrator** permission.',
+                    name: '`/announce message:<text> [role:<@role>]`',
+                    value: 'Send an announcement DM to all members, or only to members with a specific role.\n🔒 Requires **Administrator** permission.',
                     inline: false,
                 },
             )
@@ -490,6 +496,7 @@ client.on('interactionCreate', async interaction => {
     // /announce
     if (interaction.commandName === 'announce') {
         const message = interaction.options.getString('message');
+        const targetRole = interaction.options.getRole('role');
 
         await interaction.deferReply({ ephemeral: true });
 
@@ -509,11 +516,18 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
-        const humanMembers = [...members.values()].filter(m => !m.user.bot);
-        const total = humanMembers.length;
+        let targets = [...members.values()].filter(m => !m.user.bot);
+        if (targetRole) {
+            targets = targets.filter(m => m.roles.cache.has(targetRole.id));
+        }
+        const total = targets.length;
+
+        const scopeLabel = targetRole
+            ? `members with role <@&${targetRole.id}>`
+            : 'all members';
 
         const statusMessage = await interaction.channel.send(
-            `📢 Announcement in progress... Sent to 0/${total} members`,
+            `📢 Announcement in progress... Sent to 0/${total} ${scopeLabel}`,
         );
 
         const announceEmbed = new EmbedBuilder()
@@ -525,27 +539,51 @@ client.on('interactionCreate', async interaction => {
 
         let sent = 0;
         let failed = 0;
+        const DM_DELAY_MS = 1000;
+        const MAX_RETRIES = 3;
+        const RATE_LIMIT_BUFFER_MS = 500;
 
-        const BATCH_SIZE = 10;
-        for (let i = 0; i < humanMembers.length; i += BATCH_SIZE) {
-            const batch = humanMembers.slice(i, i + BATCH_SIZE);
-            const results = await Promise.allSettled(
-                batch.map(member => member.user.send({ embeds: [announceEmbed] })),
-            );
-            for (const result of results) {
-                if (result.status === 'fulfilled') {
+        for (let i = 0; i < targets.length; i++) {
+            const member = targets[i];
+            let retries = 0;
+            let success = false;
+            while (retries < MAX_RETRIES && !success) {
+                try {
+                    await member.user.send({ embeds: [announceEmbed] });
+                    success = true;
                     sent++;
-                } else {
-                    failed++;
+                } catch (err) {
+                    // Handle Discord rate-limit responses (HTTP 429)
+                    const retryAfter = err?.rawError?.retry_after ?? err?.retry_after;
+                    if (retryAfter) {
+                        const waitMs = Math.ceil(retryAfter * 1000) + RATE_LIMIT_BUFFER_MS;
+                        console.warn(`Rate limited — waiting ${waitMs}ms before retrying…`);
+                        await new Promise(resolve => setTimeout(resolve, waitMs));
+                        retries++;
+                    } else {
+                        // DMs disabled or other non-recoverable error
+                        failed++;
+                        break;
+                    }
                 }
             }
+            if (!success && retries >= MAX_RETRIES) {
+                failed++;
+            }
+
             await statusMessage.edit(
-                `📢 Announcement in progress... Sent to ${sent}/${total} members`,
+                `📢 Announcement in progress... Sent to ${sent}/${total} ${scopeLabel}`,
             );
+
+            // Respectful delay between DMs to avoid triggering spam detection
+            // Skip delay after the last member
+            if (i < targets.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, DM_DELAY_MS));
+            }
         }
 
         await statusMessage.edit(
-            `✅ Announcement sent to ${sent}/${total} members${failed > 0 ? ` (${failed} could not be reached)` : ''}`,
+            `✅ Announcement sent to ${sent}/${total} ${scopeLabel}${failed > 0 ? ` (${failed} could not be reached)` : ''}`,
         );
 
         await interaction.editReply({
