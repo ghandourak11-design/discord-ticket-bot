@@ -509,6 +509,13 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
+        const humanMembers = [...members.values()].filter(m => !m.user.bot);
+        const total = humanMembers.length;
+
+        const statusMessage = await interaction.channel.send(
+            `📢 Announcement in progress... Sent to 0/${total} members`,
+        );
+
         const announceEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle('📢 Server Announcement')
@@ -519,17 +526,27 @@ client.on('interactionCreate', async interaction => {
         let sent = 0;
         let failed = 0;
 
-        const humanMembers = [...members.values()].filter(m => !m.user.bot);
-        const results = await Promise.allSettled(
-            humanMembers.map(member => member.user.send({ embeds: [announceEmbed] })),
-        );
-        for (const result of results) {
-            if (result.status === 'fulfilled') {
-                sent++;
-            } else {
-                failed++;
+        const BATCH_SIZE = 10;
+        for (let i = 0; i < humanMembers.length; i += BATCH_SIZE) {
+            const batch = humanMembers.slice(i, i + BATCH_SIZE);
+            const results = await Promise.allSettled(
+                batch.map(member => member.user.send({ embeds: [announceEmbed] })),
+            );
+            for (const result of results) {
+                if (result.status === 'fulfilled') {
+                    sent++;
+                } else {
+                    failed++;
+                }
             }
+            await statusMessage.edit(
+                `📢 Announcement in progress... Sent to ${sent}/${total} members`,
+            );
         }
+
+        await statusMessage.edit(
+            `✅ Announcement sent to ${sent}/${total} members${failed > 0 ? ` (${failed} could not be reached)` : ''}`,
+        );
 
         await interaction.editReply({
             embeds: [
