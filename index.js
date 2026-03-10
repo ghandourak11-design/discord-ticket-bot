@@ -124,10 +124,10 @@ const commands = [
     new SlashCommandBuilder()
         .setName('rank')
         .setDescription('Check the loyalty tier of a Discord user')
-        .addStringOption(opt =>
+        .addUserOption(opt =>
             opt
-                .setName('username')
-                .setDescription('The Discord username to look up (e.g. johndoe)')
+                .setName('user')
+                .setDescription('Mention the Discord user to look up (e.g. @johndoe)')
                 .setRequired(true),
         ),
 ].map(cmd => cmd.toJSON());
@@ -400,7 +400,8 @@ function fetchUserRankData(discordUsername) {
             method: 'GET',
             headers: {
                 'Accept': 'application/json',
-                ...(RANK_API_KEY ? { 'Authorization': `Bearer ${RANK_API_KEY}` } : {}),
+                'Content-Type': 'application/json',
+                ...(RANK_API_KEY ? { 'api_key': RANK_API_KEY } : {}),
             },
         };
 
@@ -737,8 +738,8 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
-                    name: '`/rank username:<name>`',
-                    value: 'Display the loyalty tier and order history for a customer by Discord username.',
+                    name: '`/rank user:@user`',
+                    value: 'Display the loyalty tier and order history for a customer by mentioning them.',
                     inline: false,
                 },
             )
@@ -1037,7 +1038,8 @@ client.on('interactionCreate', async interaction => {
 
     // /rank
     if (interaction.commandName === 'rank') {
-        const username = interaction.options.getString('username').trim();
+        const mentionedUser = interaction.options.getUser('user');
+        const username = mentionedUser.username;
 
         await interaction.deferReply();
 
@@ -1067,11 +1069,10 @@ client.on('interactionCreate', async interaction => {
         const { totalSpent, orderCount } = rankData;
         const tier = getTier(totalSpent, orderCount);
 
-        // Try to resolve a guild member so we can show their avatar
+        // Resolve the guild member from the mentioned user to get their avatar
         let discordMember = null;
         try {
-            const members = await interaction.guild.members.search({ query: username, limit: 1 });
-            discordMember = members.first() ?? null;
+            discordMember = await interaction.guild.members.fetch(mentionedUser.id);
         } catch {
             // Non-critical — avatar just won't appear
         }
