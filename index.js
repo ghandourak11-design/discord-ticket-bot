@@ -79,8 +79,8 @@ const commands = [
                 .setDescription('Set the price per unit for a product (used in /rank spending calculation)')
                 .addStringOption(opt =>
                     opt
-                        .setName('product_name')
-                        .setDescription('Product name (e.g., "1M DonutSMP Money")')
+                        .setName('stripe_product_id')
+                        .setDescription('Stripe product ID (e.g., "prod_abc123")')
                         .setRequired(true),
                 )
                 .addNumberOption(opt =>
@@ -392,7 +392,7 @@ const RANK_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
  * then aggregates all orders to compute total spent and order count.
  *
  * @param {string} discordUsername
- * @param {Object} productPrices  Map of product name → price per unit
+ * @param {Object} productPrices  Map of stripe_product_id → price per unit
  * @returns {Promise<{ totalSpent: number, orderCount: number, orders: object[] }>}
  */
 function fetchUserRankData(discordUsername, productPrices = {}) {
@@ -444,12 +444,12 @@ function fetchUserRankData(discordUsername, productPrices = {}) {
                         const allOrders = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
 
                         // Calculate total spent using quantity × price per unit.
-                        // productPrices maps product name → price per unit set via /settings set-product-price.
+                        // productPrices maps stripe_product_id → price per unit set via /settings set-product-price.
                         // If no price is configured for a product, that order contributes $0.
 
                         const totalSpent = allOrders.reduce((sum, order) => {
-                            const productName = order.product_name || 'Unknown';
-                            const pricePerUnit = productPrices[productName] || 0;
+                            const stripeProductId = order.stripe_product_id || '';
+                            const pricePerUnit = productPrices[stripeProductId] || 0;
                             const orderCost = (typeof order.amount_total === 'number' ? order.amount_total : 0) * pricePerUnit;
                             return sum + orderCost;
                         }, 0);
@@ -749,8 +749,8 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
-                    name: '`/settings set-product-price product_name:<name> price:<amount>`',
-                    value: 'Set the price per unit for a product so `/rank` can calculate spending correctly (quantity × price).\n🔒 Requires **Manage Server** permission.',
+                    name: '`/settings set-product-price stripe_product_id:<id> price:<amount>`',
+                    value: 'Set the price per unit for a Stripe product (e.g., `prod_abc123`) so `/rank` can calculate spending correctly (amount_total × price).\n🔒 Requires **Manage Server** permission.',
                     inline: false,
                 },
                 {
@@ -834,11 +834,11 @@ client.on('interactionCreate', async interaction => {
         interaction.commandName === 'settings' &&
         interaction.options.getSubcommand() === 'set-product-price'
     ) {
-        const productName = interaction.options.getString('product_name');
+        const stripeProductId = interaction.options.getString('stripe_product_id');
         const price = interaction.options.getNumber('price');
         const config = loadConfig();
         if (!config.productPrices) config.productPrices = {};
-        config.productPrices[productName] = price;
+        config.productPrices[stripeProductId] = price;
         saveConfig(config);
 
         const priceFormatted = price.toFixed(2);
@@ -848,7 +848,7 @@ client.on('interactionCreate', async interaction => {
                     .setColor(0x57F287)
                     .setTitle('✅ Product Price Saved')
                     .setDescription(
-                        `Price for **${productName}** has been set to **$${priceFormatted}** per unit.\n\nThe \`/rank\` command will now calculate spending as: \`quantity × $${priceFormatted}\`.`,
+                        `Price for Stripe product **${stripeProductId}** has been set to **$${priceFormatted}** per unit.\n\nThe \`/rank\` command will now calculate spending as: \`amount_total × $${priceFormatted}\`.`,
                     ),
             ],
             ephemeral: true,
