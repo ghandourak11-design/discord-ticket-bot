@@ -244,25 +244,25 @@ const TIERS = [
         name: 'Diamond',
         color: 0xB9F2FF,
         emoji: '💎',
-        check: (spent, orders) => spent >= 2000 && orders >= 50,
+        check: (spent, orders) => spent >= 500 && orders >= 15,
     },
     {
         name: 'Platinum',
         color: 0xE5E4E2,
         emoji: '🏆',
-        check: (spent, orders) => spent >= 2000 || orders >= 50,
+        check: (spent, orders) => spent >= 200 || orders >= 15,
     },
     {
         name: 'Gold',
         color: 0xFFD700,
         emoji: '🥇',
-        check: (spent, orders) => spent >= 500 || orders >= 16,
+        check: (spent, orders) => spent >= 75 || orders >= 6,
     },
     {
         name: 'Silver',
         color: 0xC0C0C0,
         emoji: '🥈',
-        check: (spent, orders) => spent >= 100 || orders >= 5,
+        check: (spent, orders) => spent >= 25 || orders >= 2,
     },
     {
         name: 'Bronze',
@@ -295,38 +295,74 @@ function getTier(totalSpent, orderCount) {
 // Tiers in ascending order with the requirements to REACH each tier
 const TIER_ORDER = ['Unranked', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'];
 const TIER_GOALS = {
-    Bronze:   { type: 'none', spent: 0,    orders: 1 },
-    Silver:   { type: 'or',  spent: 100,  orders: 5 },
-    Gold:     { type: 'or',  spent: 500,  orders: 16 },
-    Platinum: { type: 'or',  spent: 2000, orders: 50 },
-    Diamond:  { type: 'and', spent: 2000, orders: 50 },
+    Bronze:   { type: 'none', spent: 0,   orders: 1 },
+    Silver:   { type: 'or',  spent: 25,  orders: 2 },
+    Gold:     { type: 'or',  spent: 75,  orders: 6 },
+    Platinum: { type: 'or',  spent: 200, orders: 15 },
+    Diamond:  { type: 'and', spent: 500, orders: 15 },
 };
 
-function getTierProgress(totalSpent, orderCount, currentTierName) {
+function buildProgressBar(totalSpent, orderCount, currentTierName) {
+    const BAR_LENGTH = 12;
+    const FILLED = '█';
+    const EMPTY = '░';
+
     const currentIndex = TIER_ORDER.indexOf(currentTierName);
+
+    // Already at max tier (Diamond)
     if (currentIndex === -1 || currentIndex === TIER_ORDER.length - 1) {
-        return 'You have reached the highest tier!';
+        const bar = FILLED.repeat(BAR_LENGTH);
+        // Lines prefixed with '+' render green in Discord's diff code block syntax
+        return `\`\`\`diff\n+ [${bar}] 100% — ${currentTierName}\n\`\`\`\n🌟 Maximum rank achieved!`;
     }
 
     const nextTierName = TIER_ORDER[currentIndex + 1];
     const goal = TIER_GOALS[nextTierName];
 
+    let percentage = 0;
+    let remainingText = '';
+
     if (goal.type === 'none') {
-        return `Place your first order to reach **${nextTierName}**!`;
+        percentage = 0;
+        remainingText = 'Place your first order to reach **Bronze**!';
+    } else if (goal.type === 'or') {
+        const spentPct = goal.spent > 0 ? Math.min(100, (totalSpent / goal.spent) * 100) : 100;
+        const orderPct = goal.orders > 0 ? Math.min(100, (orderCount / goal.orders) * 100) : 100;
+        percentage = Math.round(Math.max(spentPct, orderPct));
+
+        const spentRemaining = goal.spent - totalSpent;
+        const ordersRemaining = goal.orders - orderCount;
+
+        if (spentRemaining <= 0 || ordersRemaining <= 0) {
+            percentage = 100;
+            remainingText = `Ready for **${nextTierName}**!`;
+        } else {
+            remainingText = `$${spentRemaining.toFixed(2)} more spent **or** ${ordersRemaining} more order${ordersRemaining !== 1 ? 's' : ''} to reach **${nextTierName}**`;
+        }
+    } else if (goal.type === 'and') {
+        const spentPct = goal.spent > 0 ? Math.min(100, (totalSpent / goal.spent) * 100) : 100;
+        const orderPct = goal.orders > 0 ? Math.min(100, (orderCount / goal.orders) * 100) : 100;
+        percentage = Math.round(Math.min(spentPct, orderPct));
+
+        const parts = [];
+        if (totalSpent < goal.spent) parts.push(`$${(goal.spent - totalSpent).toFixed(2)} more spent`);
+        if (orderCount < goal.orders) parts.push(`${goal.orders - orderCount} more order${goal.orders - orderCount !== 1 ? 's' : ''}`);
+
+        if (parts.length === 0) {
+            percentage = 100;
+            remainingText = `Ready for **${nextTierName}**!`;
+        } else {
+            remainingText = `${parts.join(' **and** ')} to reach **${nextTierName}**`;
+        }
     }
 
-    const parts = [];
-    if (totalSpent < goal.spent) {
-        parts.push(`$${(goal.spent - totalSpent).toFixed(2)} more spent`);
-    }
-    if (orderCount < goal.orders) {
-        parts.push(`${goal.orders - orderCount} more order${goal.orders - orderCount !== 1 ? 's' : ''}`);
-    }
+    percentage = Math.min(100, Math.max(0, percentage));
+    const filledCount = Math.round((percentage / 100) * BAR_LENGTH);
+    const emptyCount = BAR_LENGTH - filledCount;
+    const bar = FILLED.repeat(filledCount) + EMPTY.repeat(emptyCount);
 
-    if (parts.length === 0) return 'You have reached the highest tier!';
-
-    const joiner = goal.type === 'and' ? ' and ' : ' or ';
-    return `To reach **${nextTierName}**: ${parts.join(joiner)}`;
+    // Lines prefixed with '+' render green in Discord's diff code block syntax
+    return `\`\`\`diff\n+ [${bar}] ${percentage}% → ${nextTierName}\n\`\`\`\n${remainingText}`;
 }
 
 // Simple in-memory cache to avoid hammering the API
@@ -419,7 +455,7 @@ function buildRankEmbed(discordUsername, totalSpent, orderCount, tier, discordMe
             { name: '🏅 Tier', value: `**${tier.name}**`, inline: true },
             { name: '💰 Total Spent', value: `$${totalSpent.toFixed(2)}`, inline: true },
             { name: '📦 Delivered Orders', value: `${orderCount}`, inline: true },
-            { name: '📈 Progress', value: getTierProgress(totalSpent, orderCount, tier.name), inline: false },
+            { name: '📊 Rank Progress', value: buildProgressBar(totalSpent, orderCount, tier.name), inline: false },
         )
         .setTimestamp();
 
