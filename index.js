@@ -279,7 +279,7 @@ const TIERS = [
 ];
 
 function getTier(totalSpent, orderCount) {
-    // Users with no delivered orders are Unranked
+    // Users with no orders are Unranked
     if (orderCount === 0) {
         return TIERS.find(t => t.name === 'Unranked');
     }
@@ -371,7 +371,7 @@ const RANK_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Fetches all orders for a given Discord username from the Base44 Orders API,
- * then aggregates delivered orders to compute total spent and order count.
+ * then aggregates all orders to compute total spent and order count.
  *
  * @param {string} discordUsername
  * @returns {Promise<{ totalSpent: number, orderCount: number, orders: object[] }>}
@@ -424,18 +424,18 @@ function fetchUserRankData(discordUsername) {
                         // The API may return an array directly or wrap results
                         const allOrders = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
 
-                        // Only count delivered orders
-                        const deliveredOrders = allOrders.filter(order => order.delivered === true);
+                        // Count ALL orders (don't filter by delivered status)
+                        // This avoids the Base44 bug where marking delivered changes amount_total to 100
 
-                        const totalSpent = deliveredOrders.reduce((sum, order) => {
+                        const totalSpent = allOrders.reduce((sum, order) => {
                             const amt = typeof order.amount_total === 'number' ? order.amount_total : 0;
                             return sum + amt;
                         }, 0);
 
                         resolve({
                             totalSpent,
-                            orderCount: deliveredOrders.length,
-                            orders: deliveredOrders,
+                            orderCount: allOrders.length,
+                            orders: allOrders,
                         });
                     } catch {
                         reject(new Error('Failed to parse Orders API response'));
