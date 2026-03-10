@@ -232,8 +232,12 @@ function updateProductStock(productId, quantity) {
 
 // ─── Rank / tier system ───────────────────────────────────────────────────────
 
-const RANK_USERS_API_URL = process.env.BASE44_API_URL || '';
+const BASE44_API_BASE_URL = process.env.BASE44_API_URL || 'https://app.base44.com';
 const RANK_API_KEY = process.env.BASE44_API_KEY || '';
+const BASE44_APP_ID = process.env.BASE44_APP_ID || '698bba4e9e06a075e7c32be6';
+
+// Orders endpoint: /api/apps/{APP_ID}/entities/Order
+const RANK_ORDERS_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Order`;
 
 const TIERS = [
     {
@@ -266,20 +270,32 @@ const TIERS = [
         emoji: '🥉',
         check: () => true,
     },
+    {
+        name: 'Unranked',
+        color: 0x808080,
+        emoji: '🔘',
+        check: () => true,
+    },
 ];
 
 function getTier(totalSpent, orderCount) {
+    // Users with no delivered orders are Unranked
+    if (orderCount === 0) {
+        return TIERS.find(t => t.name === 'Unranked');
+    }
     for (const tier of TIERS) {
+        if (tier.name === 'Unranked') continue;
         if (tier.check(totalSpent, orderCount)) {
             return tier;
         }
     }
-    return TIERS[TIERS.length - 1];
+    return TIERS.find(t => t.name === 'Bronze');
 }
 
 // Tiers in ascending order with the requirements to REACH each tier
-const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'];
+const TIER_ORDER = ['Unranked', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'];
 const TIER_GOALS = {
+    Bronze:   { type: 'none', spent: 0,    orders: 1 },
     Silver:   { type: 'or',  spent: 100,  orders: 5 },
     Gold:     { type: 'or',  spent: 500,  orders: 16 },
     Platinum: { type: 'or',  spent: 2000, orders: 50 },
@@ -294,6 +310,10 @@ function getTierProgress(totalSpent, orderCount, currentTierName) {
 
     const nextTierName = TIER_ORDER[currentIndex + 1];
     const goal = TIER_GOALS[nextTierName];
+
+    if (goal.type === 'none') {
+        return `Place your first order to reach **${nextTierName}**!`;
+    }
 
     const parts = [];
     if (totalSpent < goal.spent) {
@@ -313,22 +333,29 @@ function getTierProgress(totalSpent, orderCount, currentTierName) {
 const rankCache = new Map();
 const RANK_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/**
+ * Fetches all orders for a given Discord username from the Base44 Orders API,
+ * then aggregates delivered orders to compute total spent and order count.
+ *
+ * @param {string} discordUsername
+ * @returns {Promise<{ totalSpent: number, orderCount: number, orders: object[] }>}
+ */
 function fetchUserRankData(discordUsername) {
     return new Promise((resolve, reject) => {
-        if (!RANK_USERS_API_URL) {
-            reject(new Error('BASE44_API_URL is not configured'));
+        if (!BASE44_APP_ID) {
+            reject(new Error('BASE44_APP_ID is not configured'));
             return;
         }
 
         let urlObj;
         try {
-            urlObj = new URL(RANK_USERS_API_URL);
+            urlObj = new URL(RANK_ORDERS_API_URL);
         } catch {
-            reject(new Error('BASE44_API_URL is not a valid URL'));
+            reject(new Error('Orders API URL is not valid'));
             return;
         }
 
-        // Filter by discord_username field; adjust query param if your schema differs
+        // Filter orders by discord_username
         urlObj.searchParams.set('discord_username', discordUsername);
 
         const reqOptions = {
@@ -345,16 +372,32 @@ function fetchUserRankData(discordUsername) {
             .get(reqOptions, res => {
                 if (res.statusCode < 200 || res.statusCode >= 300) {
                     res.resume();
-                    reject(new Error(`Rank API returned status ${res.statusCode}`));
+                    reject(new Error(`Orders API returned status ${res.statusCode}`));
                     return;
                 }
                 let raw = '';
                 res.on('data', chunk => { raw += chunk; });
                 res.on('end', () => {
                     try {
-                        resolve(JSON.parse(raw));
+                        const data = JSON.parse(raw);
+                        // The API may return an array directly or wrap results
+                        const allOrders = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
+
+                        // Only count delivered orders
+                        const deliveredOrders = allOrders.filter(order => order.delivered === true);
+
+                        const totalSpent = deliveredOrders.reduce((sum, order) => {
+                            const amt = typeof order.amount_total === 'number' ? order.amount_total : 0;
+                            return sum + amt;
+                        }, 0);
+
+                        resolve({
+                            totalSpent,
+                            orderCount: deliveredOrders.length,
+                            orders: deliveredOrders,
+                        });
                     } catch {
-                        reject(new Error('Failed to parse rank API response'));
+                        reject(new Error('Failed to parse Orders API response'));
                     }
                 });
             })
@@ -362,22 +405,8 @@ function fetchUserRankData(discordUsername) {
     });
 }
 
-function buildRankEmbed(userData, tier, discordMember) {
-    const username =
-        userData.discord_username ||
-        userData.username ||
-        userData.name ||
-        (discordMember ? discordMember.user.username : 'Unknown');
-
-    const totalSpent =
-        typeof (userData.total_spent ?? userData.totalSpent ?? userData.spent) === 'number'
-            ? (userData.total_spent ?? userData.totalSpent ?? userData.spent)
-            : 0;
-
-    const orderCount =
-        typeof (userData.order_count ?? userData.orderCount ?? userData.orders) === 'number'
-            ? (userData.order_count ?? userData.orderCount ?? userData.orders)
-            : 0;
+function buildRankEmbed(discordUsername, totalSpent, orderCount, tier, discordMember) {
+    const username = discordMember ? discordMember.user.username : discordUsername;
 
     const avatarUrl = discordMember
         ? discordMember.user.displayAvatarURL({ size: 128 })
@@ -389,7 +418,7 @@ function buildRankEmbed(userData, tier, discordMember) {
         .addFields(
             { name: '🏅 Tier', value: `**${tier.name}**`, inline: true },
             { name: '💰 Total Spent', value: `$${totalSpent.toFixed(2)}`, inline: true },
-            { name: '📦 Total Orders', value: `${orderCount}`, inline: true },
+            { name: '📦 Delivered Orders', value: `${orderCount}`, inline: true },
             { name: '📈 Progress', value: getTierProgress(totalSpent, orderCount, tier.name), inline: false },
         )
         .setTimestamp();
@@ -983,23 +1012,9 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
-        if (!RANK_USERS_API_URL) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ Rank Unavailable')
-                        .setDescription(
-                            'The rank system is not configured. Please ask an admin to set `BASE44_API_URL` in the bot environment.',
-                        ),
-                ],
-            });
-            return;
-        }
-
-        let apiResult;
+        let rankData;
         try {
-            apiResult = await fetchUserRankData(username);
+            rankData = await fetchUserRankData(username);
         } catch (err) {
             console.error('Rank API error:', err);
             await interaction.editReply({
@@ -1013,33 +1028,7 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
-        // API may return an array of matching records or a single object
-        const record = Array.isArray(apiResult) ? apiResult[0] : apiResult;
-
-        if (!record) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('🔍 User Not Found')
-                        .setDescription(
-                            `No customer record found for **${username}**. Make sure the username matches exactly.`,
-                        ),
-                ],
-            });
-            return;
-        }
-
-        const totalSpent =
-            typeof (record.total_spent ?? record.totalSpent ?? record.spent) === 'number'
-                ? (record.total_spent ?? record.totalSpent ?? record.spent)
-                : 0;
-
-        const orderCount =
-            typeof (record.order_count ?? record.orderCount ?? record.orders) === 'number'
-                ? (record.order_count ?? record.orderCount ?? record.orders)
-                : 0;
-
+        const { totalSpent, orderCount } = rankData;
         const tier = getTier(totalSpent, orderCount);
 
         // Try to resolve a guild member so we can show their avatar
@@ -1051,7 +1040,7 @@ client.on('interactionCreate', async interaction => {
             // Non-critical — avatar just won't appear
         }
 
-        const embed = buildRankEmbed(record, tier, discordMember);
+        const embed = buildRankEmbed(username, totalSpent, orderCount, tier, discordMember);
 
         rankCache.set(username.toLowerCase(), { embed, ts: Date.now() });
 
