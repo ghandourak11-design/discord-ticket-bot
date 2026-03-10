@@ -72,6 +72,24 @@ const commands = [
                         .setDescription('The role to mention in restock notifications')
                         .setRequired(true),
                 ),
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('set-product-price')
+                .setDescription('Set the price per unit for a product (used in /rank spending calculation)')
+                .addStringOption(opt =>
+                    opt
+                        .setName('product_name')
+                        .setDescription('Product name (e.g., "1M DonutSMP Money")')
+                        .setRequired(true),
+                )
+                .addNumberOption(opt =>
+                    opt
+                        .setName('price')
+                        .setDescription('Price per unit in dollars (e.g., 0.10)')
+                        .setRequired(true)
+                        .setMinValue(0),
+                ),
         ),
 
     new SlashCommandBuilder()
@@ -374,9 +392,10 @@ const RANK_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
  * then aggregates all orders to compute total spent and order count.
  *
  * @param {string} discordUsername
+ * @param {Object} productPrices  Map of product name → price per unit
  * @returns {Promise<{ totalSpent: number, orderCount: number, orders: object[] }>}
  */
-function fetchUserRankData(discordUsername) {
+function fetchUserRankData(discordUsername, productPrices = {}) {
     return new Promise((resolve, reject) => {
         if (!BASE44_APP_ID) {
             reject(new Error('BASE44_APP_ID is not configured'));
@@ -424,12 +443,15 @@ function fetchUserRankData(discordUsername) {
                         // The API may return an array directly or wrap results
                         const allOrders = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
 
-                        // Count ALL orders (don't filter by delivered status)
-                        // This avoids the Base44 bug where marking delivered changes amount_total to 100
+                        // Calculate total spent using quantity × price per unit.
+                        // productPrices maps product name → price per unit set via /settings set-product-price.
+                        // If no price is configured for a product, that order contributes $0.
 
                         const totalSpent = allOrders.reduce((sum, order) => {
-                            const amt = typeof order.amount_total === 'number' ? order.amount_total : 0;
-                            return sum + amt;
+                            const productName = order.product_name || 'Unknown';
+                            const pricePerUnit = productPrices[productName] || 0;
+                            const orderCost = (typeof order.amount_total === 'number' ? order.amount_total : 0) * pricePerUnit;
+                            return sum + orderCost;
                         }, 0);
 
                         resolve({
@@ -727,6 +749,11 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
+                    name: '`/settings set-product-price product_name:<name> price:<amount>`',
+                    value: 'Set the price per unit for a product so `/rank` can calculate spending correctly (quantity × price).\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+                {
                     name: '`/restock product:<name> quantity:<n>`',
                     value: 'Send a restock notification embed to the configured channel.\n🔒 Requires **Manage Server** permission.',
                     inline: false,
@@ -795,6 +822,33 @@ client.on('interactionCreate', async interaction => {
                     .setTitle('✅ Settings Updated')
                     .setDescription(
                         `<@&${role.id}> will now be pinged on restock notifications.`,
+                    ),
+            ],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // /settings set-product-price
+    if (
+        interaction.commandName === 'settings' &&
+        interaction.options.getSubcommand() === 'set-product-price'
+    ) {
+        const productName = interaction.options.getString('product_name');
+        const price = interaction.options.getNumber('price');
+        const config = loadConfig();
+        if (!config.productPrices) config.productPrices = {};
+        config.productPrices[productName] = price;
+        saveConfig(config);
+
+        const priceFormatted = price.toFixed(2);
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Product Price Saved')
+                    .setDescription(
+                        `Price for **${productName}** has been set to **$${priceFormatted}** per unit.\n\nThe \`/rank\` command will now calculate spending as: \`quantity × $${priceFormatted}\`.`,
                     ),
             ],
             ephemeral: true,
@@ -1056,7 +1110,9 @@ client.on('interactionCreate', async interaction => {
 
         let rankData;
         try {
-            rankData = await fetchUserRankData(username);
+            const config = loadConfig();
+            const productPrices = config.productPrices || {};
+            rankData = await fetchUserRankData(username, productPrices);
         } catch (err) {
             console.error('Rank API error:', err);
             await interaction.editReply({
