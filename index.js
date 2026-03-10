@@ -383,6 +383,11 @@ function fetchUserRankData(discordUsername) {
             return;
         }
 
+        if (!RANK_API_KEY) {
+            reject(new Error('BASE44_API_KEY is not configured'));
+            return;
+        }
+
         let urlObj;
         try {
             urlObj = new URL(RANK_ORDERS_API_URL);
@@ -399,9 +404,8 @@ function fetchUserRankData(discordUsername) {
             path: urlObj.pathname + urlObj.search,
             method: 'GET',
             headers: {
-                'Accept': 'application/json',
+                'api_key': RANK_API_KEY,
                 'Content-Type': 'application/json',
-                ...(RANK_API_KEY ? { 'api_key': RANK_API_KEY } : {}),
             },
         };
 
