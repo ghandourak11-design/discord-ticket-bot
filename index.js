@@ -155,6 +155,13 @@ const commands = [
                 .setName('minecraft_username')
                 .setDescription('The Minecraft username you used at checkout')
                 .setRequired(true),
+        )
+        .addNumberOption(opt =>
+            opt
+                .setName('amount')
+                .setDescription('Your most recent order amount in USD (e.g. 17.64)')
+                .setRequired(true)
+                .setMinValue(0),
         ),
 
     new SlashCommandBuilder()
@@ -454,6 +461,94 @@ function fetchCustomerByMinecraft(mcUsername) {
                         resolve(results.length > 0 ? results[0] : null);
                     } catch {
                         reject(new Error('Failed to parse Customer API response'));
+                    }
+                });
+            })
+            .on('error', reject);
+    });
+}
+
+// Order endpoint: /api/apps/{APP_ID}/entities/Order
+const ORDER_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Order`;
+
+/**
+ * Returns the date value from an order object, checking multiple known field names.
+ *
+ * @param {object} order
+ * @returns {number}  Timestamp in ms (0 if no date found)
+ */
+function getOrderDate(order) {
+    const raw = order._created ?? order.created_date ?? order.order_date ?? order.created_at ?? null;
+    if (!raw) return 0;
+    const ts = new Date(raw).getTime();
+    return isNaN(ts) ? 0 : ts;
+}
+
+/**
+ * Returns the monetary amount from an order object, checking multiple known field names.
+ *
+ * @param {object} order
+ * @returns {number|null}
+ */
+function getOrderAmount(order) {
+    const val = order.amount_total ?? order.total ?? order.amount ?? order.order_total ?? null;
+    return typeof val === 'number' ? val : null;
+}
+
+/**
+ * Fetches orders for a given Minecraft username from the Base44 Order API.
+ *
+ * @param {string} mcUsername
+ * @returns {Promise<object[]>}  Array of order objects
+ */
+function fetchOrdersByMinecraft(mcUsername) {
+    return new Promise((resolve, reject) => {
+        if (!BASE44_APP_ID) {
+            reject(new Error('BASE44_APP_ID is not configured'));
+            return;
+        }
+
+        if (!STATS_API_KEY) {
+            reject(new Error('BASE44_API_KEY is not configured'));
+            return;
+        }
+
+        let urlObj;
+        try {
+            urlObj = new URL(ORDER_API_URL);
+        } catch {
+            reject(new Error('Order API URL is not valid'));
+            return;
+        }
+
+        urlObj.searchParams.set('minecraft_username', mcUsername);
+
+        const reqOptions = {
+            hostname: urlObj.hostname,
+            path: urlObj.pathname + urlObj.search,
+            method: 'GET',
+            headers: {
+                'api_key': STATS_API_KEY,
+                'Content-Type': 'application/json',
+            },
+        };
+
+        https
+            .get(reqOptions, res => {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res.resume();
+                    reject(new Error(`Order API returned status ${res.statusCode}`));
+                    return;
+                }
+                let raw = '';
+                res.on('data', chunk => { raw += chunk; });
+                res.on('end', () => {
+                    try {
+                        const data = JSON.parse(raw);
+                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
+                        resolve(results);
+                    } catch {
+                        reject(new Error('Failed to parse Order API response'));
                     }
                 });
             })
@@ -846,8 +941,8 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
-                    name: '`/claim minecraft_username:<name>`',
-                    value: 'Link your Discord account to your purchase history by providing the Minecraft username you used at checkout.',
+                    name: '`/claim minecraft_username:<name> amount:<dollars>`',
+                    value: 'Link your Discord account to your purchase history. Provide the Minecraft username you used at checkout and your most recent order amount in USD for verification.',
                     inline: false,
                 },
                 {
@@ -1182,10 +1277,12 @@ client.on('interactionCreate', async interaction => {
     // /claim
     if (interaction.commandName === 'claim') {
         const mcUsername = interaction.options.getString('minecraft_username');
+        const providedAmount = interaction.options.getNumber('amount');
         const discordUsername = interaction.user.username;
 
         await interaction.deferReply({ ephemeral: true });
 
+        // Step 1: Verify customer exists for the given Minecraft username
         let customer;
         try {
             customer = await fetchCustomerByMinecraft(mcUsername);
@@ -1208,40 +1305,75 @@ client.on('interactionCreate', async interaction => {
                     new EmbedBuilder()
                         .setColor(0xFEE75C)
                         .setTitle('❌ No Customer Found')
-                        .setDescription(`No customer record was found with the Minecraft username **${mcUsername}**.\n\nMake sure you used the exact username from your checkout.`),
+                        .setDescription(`No customer found with that Minecraft username.`),
                 ],
             });
             return;
         }
 
-        const existingDiscord = customer.discord_username;
-        if (existingDiscord && existingDiscord.toLowerCase() !== discordUsername.toLowerCase()) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ Already Claimed')
-                        .setDescription('This Minecraft account is already linked to another Discord user.'),
-                ],
-            });
-            return;
-        }
-
-        const customerId = customer._id || customer.id;
+        // Step 2: Fetch orders and verify amount
+        let orders;
         try {
-            await updateCustomerDiscordUsername(customerId, discordUsername);
+            orders = await fetchOrdersByMinecraft(mcUsername);
         } catch (err) {
-            console.error('Claim update error:', err);
+            console.error('Claim orders API error:', err);
             await interaction.editReply({
                 embeds: [
                     new EmbedBuilder()
                         .setColor(0xED4245)
-                        .setTitle('❌ Update Failed')
-                        .setDescription('Could not link your Discord account. Please try again later.'),
+                        .setTitle('❌ API Unreachable')
+                        .setDescription('Could not fetch order data. Please try again later.'),
                 ],
             });
             return;
         }
+
+        if (!orders || orders.length === 0) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('❌ No Orders Found')
+                        .setDescription('❌ No orders found for that Minecraft username.'),
+                ],
+            });
+            return;
+        }
+
+        // Find most recent order by sorting on known date fields
+        const sortedOrders = [...orders].sort((a, b) => getOrderDate(b) - getOrderDate(a));
+        const mostRecentOrder = sortedOrders[0];
+        const actualAmount = getOrderAmount(mostRecentOrder);
+
+        if (actualAmount === null) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Verification Failed')
+                        .setDescription('Could not read the order amount from your most recent order. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        if (Math.abs(providedAmount - actualAmount) > 0.10) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Verification Failed')
+                        .setDescription('❌ Verification failed. The order amount you provided doesn\'t match the most recent order for that Minecraft username. Please double-check and try again.'),
+                ],
+            });
+            return;
+        }
+
+        // Step 3: Save local mapping discord_username → minecraft_username
+        const config = loadConfig();
+        if (!config.claimedAccounts) config.claimedAccounts = {};
+        config.claimedAccounts[discordUsername] = mcUsername;
+        saveConfig(config);
 
         // Clear cached stats so /stats shows fresh data
         statsCache.delete(discordUsername.toLowerCase());
@@ -1338,7 +1470,13 @@ client.on('interactionCreate', async interaction => {
 
         let customer;
         try {
-            customer = await fetchCustomerData(username);
+            // Check if this Discord user has a claimed Minecraft username mapping
+            const claimedMcUsername = config.claimedAccounts && config.claimedAccounts[username];
+            if (claimedMcUsername) {
+                customer = await fetchCustomerByMinecraft(claimedMcUsername);
+            } else {
+                customer = await fetchCustomerData(username);
+            }
         } catch (err) {
             console.error('Stats API error:', err);
             await interaction.editReply({
