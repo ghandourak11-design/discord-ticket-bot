@@ -72,24 +72,6 @@ const commands = [
                         .setDescription('The role to mention in restock notifications')
                         .setRequired(true),
                 ),
-        )
-        .addSubcommand(sub =>
-            sub
-                .setName('set-product-price')
-                .setDescription('Set the price per unit for a product (used in /rank spending calculation)')
-                .addStringOption(opt =>
-                    opt
-                        .setName('stripe_product_id')
-                        .setDescription('Stripe product ID (e.g., "prod_abc123")')
-                        .setRequired(true),
-                )
-                .addNumberOption(opt =>
-                    opt
-                        .setName('price')
-                        .setDescription('Price per unit in dollars (e.g., 0.10)')
-                        .setRequired(true)
-                        .setMinValue(0),
-                ),
         ),
 
     new SlashCommandBuilder()
@@ -140,8 +122,8 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
-        .setName('rank')
-        .setDescription('Check the loyalty tier of a Discord user')
+        .setName('stats')
+        .setDescription('Check the loyalty stats and profile of a Discord user')
         .addUserOption(opt =>
             opt
                 .setName('user')
@@ -248,174 +230,83 @@ function updateProductStock(productId, quantity) {
     });
 }
 
-// ─── Rank / tier system ───────────────────────────────────────────────────────
+// ─── Stats / Customer system ──────────────────────────────────────────────────
 
 const BASE44_API_BASE_URL = process.env.BASE44_API_URL || 'https://app.base44.com';
-const RANK_API_KEY = process.env.BASE44_API_KEY || '';
+const STATS_API_KEY = process.env.BASE44_API_KEY || '';
 const BASE44_APP_ID = process.env.BASE44_APP_ID || '698bba4e9e06a075e7c32be6';
 
-// Orders endpoint: /api/apps/{APP_ID}/entities/Order
-const RANK_ORDERS_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Order`;
+// Customer endpoint: /api/apps/{APP_ID}/entities/Customer
+const CUSTOMER_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Customer`;
 
-const TIERS = [
-    {
-        name: 'Diamond',
-        color: 0xB9F2FF,
-        emoji: '💎',
-        check: (spent, orders) => spent >= 500 && orders >= 15,
-    },
-    {
-        name: 'Platinum',
-        color: 0xE5E4E2,
-        emoji: '🏆',
-        check: (spent, orders) => spent >= 200 || orders >= 15,
-    },
-    {
-        name: 'Gold',
-        color: 0xFFD700,
-        emoji: '🥇',
-        check: (spent, orders) => spent >= 75 || orders >= 6,
-    },
-    {
-        name: 'Silver',
-        color: 0xC0C0C0,
-        emoji: '🥈',
-        check: (spent, orders) => spent >= 25 || orders >= 2,
-    },
-    {
-        name: 'Bronze',
-        color: 0xCD7F32,
-        emoji: '🥉',
-        check: () => true,
-    },
-    {
-        name: 'Unranked',
-        color: 0x808080,
-        emoji: '🔘',
-        check: () => true,
-    },
-];
-
-function getTier(totalSpent, orderCount) {
-    // Users with no orders are Unranked
-    if (orderCount === 0) {
-        return TIERS.find(t => t.name === 'Unranked');
-    }
-    for (const tier of TIERS) {
-        if (tier.name === 'Unranked') continue;
-        if (tier.check(totalSpent, orderCount)) {
-            return tier;
-        }
-    }
-    return TIERS.find(t => t.name === 'Bronze');
+/**
+ * Formats a date string into a readable format (e.g., "Mar 11, 2026").
+ * Returns "N/A" if the value is null, undefined, or empty.
+ *
+ * @param {string|null|undefined} dateStr
+ * @returns {string}
+ */
+function formatDate(dateStr) {
+    if (!dateStr) return 'N/A';
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return 'N/A';
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// Tiers in ascending order with the requirements to REACH each tier
-const TIER_ORDER = ['Unranked', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'];
-const TIER_GOALS = {
-    Bronze:   { type: 'none', spent: 0,   orders: 1 },
-    Silver:   { type: 'or',  spent: 25,  orders: 2 },
-    Gold:     { type: 'or',  spent: 75,  orders: 6 },
-    Platinum: { type: 'or',  spent: 200, orders: 15 },
-    Diamond:  { type: 'and', spent: 500, orders: 15 },
-};
+/**
+ * Calculates loyalty points from order count.
+ * First order = 25 points; each additional = 2 points. Max 100.
+ *
+ * @param {number} orderCount
+ * @returns {number}
+ */
+function calcLoyaltyPoints(orderCount) {
+    return orderCount >= 1 ? Math.min(100, 25 + (orderCount - 1) * 2) : 0;
+}
 
-function buildProgressBar(totalSpent, orderCount, currentTierName) {
-    const BAR_LENGTH = 12;
-    const FILLED = '█';
-    const EMPTY = '░';
-
-    const currentIndex = TIER_ORDER.indexOf(currentTierName);
-
-    // Already at max tier (Diamond)
-    if (currentIndex === -1 || currentIndex === TIER_ORDER.length - 1) {
-        const bar = FILLED.repeat(BAR_LENGTH);
-        // Lines prefixed with '+' render green in Discord's diff code block syntax
-        return `\`\`\`diff\n+ [${bar}] 100% — ${currentTierName}\n\`\`\`\n🌟 Maximum rank achieved!`;
-    }
-
-    const nextTierName = TIER_ORDER[currentIndex + 1];
-    const goal = TIER_GOALS[nextTierName];
-
-    let percentage = 0;
-    let remainingText = '';
-
-    if (goal.type === 'none') {
-        percentage = 0;
-        remainingText = 'Place your first order to reach **Bronze**!';
-    } else if (goal.type === 'or') {
-        const spentPct = goal.spent > 0 ? Math.min(100, (totalSpent / goal.spent) * 100) : 100;
-        const orderPct = goal.orders > 0 ? Math.min(100, (orderCount / goal.orders) * 100) : 100;
-        percentage = Math.round(Math.max(spentPct, orderPct));
-
-        const spentRemaining = goal.spent - totalSpent;
-        const ordersRemaining = goal.orders - orderCount;
-
-        if (spentRemaining <= 0 || ordersRemaining <= 0) {
-            percentage = 100;
-            remainingText = `Ready for **${nextTierName}**!`;
-        } else {
-            remainingText = `$${spentRemaining.toFixed(2)} more spent **or** ${ordersRemaining} more order${ordersRemaining !== 1 ? 's' : ''} to reach **${nextTierName}**`;
-        }
-    } else if (goal.type === 'and') {
-        const spentPct = goal.spent > 0 ? Math.min(100, (totalSpent / goal.spent) * 100) : 100;
-        const orderPct = goal.orders > 0 ? Math.min(100, (orderCount / goal.orders) * 100) : 100;
-        percentage = Math.round(Math.min(spentPct, orderPct));
-
-        const parts = [];
-        if (totalSpent < goal.spent) parts.push(`$${(goal.spent - totalSpent).toFixed(2)} more spent`);
-        if (orderCount < goal.orders) parts.push(`${goal.orders - orderCount} more order${goal.orders - orderCount !== 1 ? 's' : ''}`);
-
-        if (parts.length === 0) {
-            percentage = 100;
-            remainingText = `Ready for **${nextTierName}**!`;
-        } else {
-            remainingText = `${parts.join(' **and** ')} to reach **${nextTierName}**`;
-        }
-    }
-
-    percentage = Math.min(100, Math.max(0, percentage));
-    const filledCount = Math.round((percentage / 100) * BAR_LENGTH);
-    const emptyCount = BAR_LENGTH - filledCount;
-    const bar = FILLED.repeat(filledCount) + EMPTY.repeat(emptyCount);
-
-    // Lines prefixed with '+' render green in Discord's diff code block syntax
-    return `\`\`\`diff\n+ [${bar}] ${percentage}% → ${nextTierName}\n\`\`\`\n${remainingText}`;
+/**
+ * Builds a visual progress bar using emoji squares (20 segments wide).
+ *
+ * @param {number} points  0–100
+ * @returns {string}
+ */
+function buildLoyaltyBar(points) {
+    const TOTAL_SEGMENTS = 20;
+    const filled = Math.round((points / 100) * TOTAL_SEGMENTS);
+    const empty = TOTAL_SEGMENTS - filled;
+    return '🟩'.repeat(filled) + '⬜'.repeat(empty);
 }
 
 // Simple in-memory cache to avoid hammering the API
-const rankCache = new Map();
-const RANK_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const statsCache = new Map();
+const STATS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
- * Fetches all orders for a given Discord username from the Base44 Orders API,
- * then aggregates all orders to compute total spent and order count.
+ * Fetches customer data for a given Discord username from the Base44 Customer API.
  *
  * @param {string} discordUsername
- * @param {Object} productPrices  Map of stripe_product_id → price per unit
- * @returns {Promise<{ totalSpent: number, orderCount: number, orders: object[] }>}
+ * @returns {Promise<object|null>}  Customer record or null if not found
  */
-function fetchUserRankData(discordUsername, productPrices = {}) {
+function fetchCustomerData(discordUsername) {
     return new Promise((resolve, reject) => {
         if (!BASE44_APP_ID) {
             reject(new Error('BASE44_APP_ID is not configured'));
             return;
         }
 
-        if (!RANK_API_KEY) {
+        if (!STATS_API_KEY) {
             reject(new Error('BASE44_API_KEY is not configured'));
             return;
         }
 
         let urlObj;
         try {
-            urlObj = new URL(RANK_ORDERS_API_URL);
+            urlObj = new URL(CUSTOMER_API_URL);
         } catch {
-            reject(new Error('Orders API URL is not valid'));
+            reject(new Error('Customer API URL is not valid'));
             return;
         }
 
-        // Filter orders by discord_username
         urlObj.searchParams.set('discord_username', discordUsername);
 
         const reqOptions = {
@@ -423,7 +314,7 @@ function fetchUserRankData(discordUsername, productPrices = {}) {
             path: urlObj.pathname + urlObj.search,
             method: 'GET',
             headers: {
-                'api_key': RANK_API_KEY,
+                'api_key': STATS_API_KEY,
                 'Content-Type': 'application/json',
             },
         };
@@ -432,7 +323,7 @@ function fetchUserRankData(discordUsername, productPrices = {}) {
             .get(reqOptions, res => {
                 if (res.statusCode < 200 || res.statusCode >= 300) {
                     res.resume();
-                    reject(new Error(`Orders API returned status ${res.statusCode}`));
+                    reject(new Error(`Customer API returned status ${res.statusCode}`));
                     return;
                 }
                 let raw = '';
@@ -440,27 +331,10 @@ function fetchUserRankData(discordUsername, productPrices = {}) {
                 res.on('end', () => {
                     try {
                         const data = JSON.parse(raw);
-                        // The API may return an array directly or wrap results
-                        const allOrders = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
-
-                        // Calculate total spent using quantity × price per unit.
-                        // productPrices maps stripe_product_id → price per unit set via /settings set-product-price.
-                        // If no price is configured for a product, that order contributes $0.
-
-                        const totalSpent = allOrders.reduce((sum, order) => {
-                            const stripeProductId = order.stripe_product_id || '';
-                            const pricePerUnit = productPrices[stripeProductId] || 0;
-                            const orderCost = (typeof order.amount_total === 'number' ? order.amount_total : 0) * pricePerUnit;
-                            return sum + orderCost;
-                        }, 0);
-
-                        resolve({
-                            totalSpent,
-                            orderCount: allOrders.length,
-                            orders: allOrders,
-                        });
+                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
+                        resolve(results.length > 0 ? results[0] : null);
                     } catch {
-                        reject(new Error('Failed to parse Orders API response'));
+                        reject(new Error('Failed to parse Customer API response'));
                     }
                 });
             })
@@ -468,22 +342,43 @@ function fetchUserRankData(discordUsername, productPrices = {}) {
     });
 }
 
-function buildRankEmbed(discordUsername, totalSpent, orderCount, tier, discordMember) {
-    const username = discordMember ? discordMember.user.username : discordUsername;
-
+function buildStatsEmbed(customer, discordMember) {
+    const username = discordMember ? discordMember.user.username : (customer.discord_username || 'Unknown');
     const avatarUrl = discordMember
         ? discordMember.user.displayAvatarURL({ size: 128 })
         : null;
 
+    const orderCount = typeof customer.order_count === 'number' ? customer.order_count : 0;
+    const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
+    const loyaltyClaimed = typeof customer.loyalty_dollars_claimed === 'number' ? customer.loyalty_dollars_claimed : 0;
+
+    const points = calcLoyaltyPoints(orderCount);
+    const bar = buildLoyaltyBar(points);
+
     const embed = new EmbedBuilder()
-        .setColor(tier.color)
-        .setTitle(`${tier.emoji} ${username}'s Rank`)
+        .setColor(0x1E1F22)
+        .setTitle(`Profile — ${username}`)
+        .setDescription(`🟢 **Loyalty Points: ${points}/100**\n${bar}`)
         .addFields(
-            { name: '🏅 Tier', value: `**${tier.name}**`, inline: true },
-            { name: '💰 Total Spent', value: `$${totalSpent.toFixed(2)}`, inline: true },
-            { name: '📦 Delivered Orders', value: `${orderCount}`, inline: true },
-            { name: '📊 Rank Progress', value: buildProgressBar(totalSpent, orderCount, tier.name), inline: false },
+            {
+                name: '📊 Standing',
+                value: [
+                    `💰 Total Spent: $${totalSpent.toFixed(2)}`,
+                    `📦 Orders: ${orderCount}`,
+                    `🎁 Loyalty $ Claimed: $${loyaltyClaimed.toFixed(2)}`,
+                ].join('\n'),
+                inline: true,
+            },
+            {
+                name: '📈 Activity',
+                value: [
+                    `🗓️ First Purchase: ${formatDate(customer.first_purchase_date)}`,
+                    `🕐 Last Purchase: ${formatDate(customer.last_purchase_date)}`,
+                ].join('\n'),
+                inline: true,
+            },
         )
+        .setFooter({ text: 'DonutDemand Bot' })
         .setTimestamp();
 
     if (avatarUrl) {
@@ -749,11 +644,6 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
-                    name: '`/settings set-product-price stripe_product_id:<id> price:<amount>`',
-                    value: 'Set the price per unit for a Stripe product (e.g., `prod_abc123`) so `/rank` can calculate spending correctly (amount_total × price).\n🔒 Requires **Manage Server** permission.',
-                    inline: false,
-                },
-                {
                     name: '`/restock product:<name> quantity:<n>`',
                     value: 'Send a restock notification embed to the configured channel.\n🔒 Requires **Manage Server** permission.',
                     inline: false,
@@ -769,8 +659,8 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
-                    name: '`/rank user:@user`',
-                    value: 'Display the loyalty tier and order history for a customer by mentioning them.',
+                    name: '`/stats user:@user`',
+                    value: 'Display the loyalty profile, points, and order history for a customer by mentioning them.',
                     inline: false,
                 },
             )
@@ -822,33 +712,6 @@ client.on('interactionCreate', async interaction => {
                     .setTitle('✅ Settings Updated')
                     .setDescription(
                         `<@&${role.id}> will now be pinged on restock notifications.`,
-                    ),
-            ],
-            ephemeral: true,
-        });
-        return;
-    }
-
-    // /settings set-product-price
-    if (
-        interaction.commandName === 'settings' &&
-        interaction.options.getSubcommand() === 'set-product-price'
-    ) {
-        const stripeProductId = interaction.options.getString('stripe_product_id');
-        const price = interaction.options.getNumber('price');
-        const config = loadConfig();
-        if (!config.productPrices) config.productPrices = {};
-        config.productPrices[stripeProductId] = price;
-        saveConfig(config);
-
-        const priceFormatted = price.toFixed(2);
-        await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Product Price Saved')
-                    .setDescription(
-                        `Price for Stripe product **${stripeProductId}** has been set to **$${priceFormatted}** per unit.\n\nThe \`/rank\` command will now calculate spending as: \`amount_total × $${priceFormatted}\`.`,
                     ),
             ],
             ephemeral: true,
@@ -1094,40 +957,47 @@ client.on('interactionCreate', async interaction => {
         });
     }
 
-    // /rank
-    if (interaction.commandName === 'rank') {
+    // /stats
+    if (interaction.commandName === 'stats') {
         const mentionedUser = interaction.options.getUser('user');
         const username = mentionedUser.username;
 
         await interaction.deferReply();
 
         // Return cached result if still fresh
-        const cached = rankCache.get(username.toLowerCase());
-        if (cached && Date.now() - cached.ts < RANK_CACHE_TTL_MS) {
+        const cached = statsCache.get(username.toLowerCase());
+        if (cached && Date.now() - cached.ts < STATS_CACHE_TTL_MS) {
             await interaction.editReply({ embeds: [cached.embed] });
             return;
         }
 
-        let rankData;
+        let customer;
         try {
-            const config = loadConfig();
-            const productPrices = config.productPrices || {};
-            rankData = await fetchUserRankData(username, productPrices);
+            customer = await fetchCustomerData(username);
         } catch (err) {
-            console.error('Rank API error:', err);
+            console.error('Stats API error:', err);
             await interaction.editReply({
                 embeds: [
                     new EmbedBuilder()
                         .setColor(0xED4245)
                         .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch rank data. Please try again later.'),
+                        .setDescription('Could not fetch customer data. Please try again later.'),
                 ],
             });
             return;
         }
 
-        const { totalSpent, orderCount } = rankData;
-        const tier = getTier(totalSpent, orderCount);
+        if (!customer) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('No Data Found')
+                        .setDescription(`No customer data found for **${username}**.`),
+                ],
+            });
+            return;
+        }
 
         // Resolve the guild member from the mentioned user to get their avatar
         let discordMember = null;
@@ -1137,9 +1007,9 @@ client.on('interactionCreate', async interaction => {
             // Non-critical — avatar just won't appear
         }
 
-        const embed = buildRankEmbed(username, totalSpent, orderCount, tier, discordMember);
+        const embed = buildStatsEmbed(customer, discordMember);
 
-        rankCache.set(username.toLowerCase(), { embed, ts: Date.now() });
+        statsCache.set(username.toLowerCase(), { embed, ts: Date.now() });
 
         await interaction.editReply({ embeds: [embed] });
         return;
