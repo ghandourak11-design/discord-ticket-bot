@@ -261,7 +261,7 @@ function formatDate(dateStr) {
  * @returns {number}
  */
 function calcLoyaltyPoints(orderCount) {
-    return orderCount >= 1 ? Math.min(100, 25 + (orderCount - 1) * 2) : 0;
+    return Math.min(100, orderCount * 2);
 }
 
 /**
@@ -366,7 +366,6 @@ function buildStatsEmbed(customer, discordMember) {
 
     const orderCount = typeof customer.order_count === 'number' ? customer.order_count : 0;
     const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
-    const loyaltyClaimed = typeof customer.loyalty_dollars_claimed === 'number' ? customer.loyalty_dollars_claimed : 0;
 
     const tier = getTier(totalSpent);
     const points = calcLoyaltyPoints(orderCount);
@@ -384,7 +383,6 @@ function buildStatsEmbed(customer, discordMember) {
                     `**Rank:** ${tier.emoji} ${tier.name}`,
                     `**Total Spent:** $${totalSpent.toFixed(2)}`,
                     `**Orders:** ${orderCount}`,
-                    `**Loyalty Claimed:** $${loyaltyClaimed.toFixed(2)}`,
                 ].join('\n'),
                 inline: true,
             },
