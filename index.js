@@ -148,6 +148,16 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
+        .setName('claim')
+        .setDescription('Link your Discord account to your purchase history using your Minecraft username')
+        .addStringOption(opt =>
+            opt
+                .setName('minecraft_username')
+                .setDescription('The Minecraft username you used at checkout')
+                .setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
         .setName('sync')
         .setDescription('Re-sync all bot slash commands')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -285,14 +295,15 @@ function formatDate(dateStr) {
 }
 
 /**
- * Calculates loyalty points from order count.
- * First order = 25 points; each additional = 2 points. Max 100.
+ * Calculates loyalty points from total amount spent.
+ * Every $1 spent = 0.1 loyalty points, max 100.
+ * (Requires $1,000 spent to reach the maximum of 100 points.)
  *
- * @param {number} orderCount
+ * @param {number} totalSpent
  * @returns {number}
  */
-function calcLoyaltyPoints(orderCount) {
-    return Math.min(100, orderCount * 2);
+function calcLoyaltyPoints(totalSpent) {
+    return Math.min(100, Math.round(totalSpent * 0.1 * 10) / 10);
 }
 
 /**
@@ -389,6 +400,113 @@ function fetchCustomerData(discordUsername) {
     });
 }
 
+/**
+ * Fetches customer data for a given Minecraft username from the Base44 Customer API.
+ *
+ * @param {string} mcUsername
+ * @returns {Promise<object|null>}  Customer record or null if not found
+ */
+function fetchCustomerByMinecraft(mcUsername) {
+    return new Promise((resolve, reject) => {
+        if (!BASE44_APP_ID) {
+            reject(new Error('BASE44_APP_ID is not configured'));
+            return;
+        }
+
+        if (!STATS_API_KEY) {
+            reject(new Error('BASE44_API_KEY is not configured'));
+            return;
+        }
+
+        let urlObj;
+        try {
+            urlObj = new URL(CUSTOMER_API_URL);
+        } catch {
+            reject(new Error('Customer API URL is not valid'));
+            return;
+        }
+
+        urlObj.searchParams.set('minecraft_username', mcUsername);
+
+        const reqOptions = {
+            hostname: urlObj.hostname,
+            path: urlObj.pathname + urlObj.search,
+            method: 'GET',
+            headers: {
+                'api_key': STATS_API_KEY,
+                'Content-Type': 'application/json',
+            },
+        };
+
+        https
+            .get(reqOptions, res => {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res.resume();
+                    reject(new Error(`Customer API returned status ${res.statusCode}`));
+                    return;
+                }
+                let raw = '';
+                res.on('data', chunk => { raw += chunk; });
+                res.on('end', () => {
+                    try {
+                        const data = JSON.parse(raw);
+                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
+                        resolve(results.length > 0 ? results[0] : null);
+                    } catch {
+                        reject(new Error('Failed to parse Customer API response'));
+                    }
+                });
+            })
+            .on('error', reject);
+    });
+}
+
+/**
+ * Updates the discord_username field on a customer record.
+ *
+ * @param {string} customerId
+ * @param {string} discordUsername
+ * @returns {Promise<object>}
+ */
+function updateCustomerDiscordUsername(customerId, discordUsername) {
+    return new Promise((resolve, reject) => {
+        const apiUrl = new URL(`${CUSTOMER_API_URL}/${encodeURIComponent(customerId)}`);
+        const body = JSON.stringify({ discord_username: discordUsername });
+
+        const options = {
+            hostname: apiUrl.hostname,
+            path: apiUrl.pathname,
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(body),
+                'api_key': STATS_API_KEY,
+            },
+        };
+
+        const req = https.request(options, res => {
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                res.resume();
+                reject(new Error(`Customer API returned status ${res.statusCode}`));
+                return;
+            }
+            let data = '';
+            res.on('data', chunk => { data += chunk; });
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch {
+                    resolve({});
+                }
+            });
+        });
+
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+    });
+}
+
 function buildStatsEmbed(customer, discordMember) {
     const username = discordMember ? discordMember.user.username : (customer.discord_username || 'Unknown');
     const avatarUrl = discordMember
@@ -399,14 +517,14 @@ function buildStatsEmbed(customer, discordMember) {
     const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
 
     const tier = getTier(totalSpent);
-    const points = calcLoyaltyPoints(orderCount);
+    const points = calcLoyaltyPoints(totalSpent);
     const bar = buildLoyaltyBar(points);
     const separator = '─'.repeat(30);
 
     const embed = new EmbedBuilder()
         .setColor(tier.color)
         .setTitle(`${tier.emoji} Profile — ${username}`)
-        .setDescription(`🟢 **Loyalty Points: ${points}/100**\n${bar}\n${separator}`)
+        .setDescription(`🟢 **Loyalty Points: ${points % 1 === 0 ? points : points.toFixed(1)}/100**\n${bar}\n${separator}`)
         .addFields(
             {
                 name: '🏅 Standing',
@@ -725,6 +843,11 @@ client.on('interactionCreate', async interaction => {
                 {
                     name: '`/updatestock quantity:<n>`',
                     value: 'Select a product from a dropdown and set its stock to a new quantity.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/claim minecraft_username:<name>`',
+                    value: 'Link your Discord account to your purchase history by providing the Minecraft username you used at checkout.',
                     inline: false,
                 },
                 {
@@ -1054,6 +1177,105 @@ client.on('interactionCreate', async interaction => {
             ],
             components: [row],
         });
+    }
+
+    // /claim
+    if (interaction.commandName === 'claim') {
+        const mcUsername = interaction.options.getString('minecraft_username');
+        const discordUsername = interaction.user.username;
+
+        await interaction.deferReply({ ephemeral: true });
+
+        let customer;
+        try {
+            customer = await fetchCustomerByMinecraft(mcUsername);
+        } catch (err) {
+            console.error('Claim API error:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ API Unreachable')
+                        .setDescription('Could not fetch customer data. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        if (!customer) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('❌ No Customer Found')
+                        .setDescription(`No customer record was found with the Minecraft username **${mcUsername}**.\n\nMake sure you used the exact username from your checkout.`),
+                ],
+            });
+            return;
+        }
+
+        const existingDiscord = customer.discord_username;
+        if (existingDiscord && existingDiscord.toLowerCase() !== discordUsername.toLowerCase()) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Already Claimed')
+                        .setDescription('This Minecraft account is already linked to another Discord user.'),
+                ],
+            });
+            return;
+        }
+
+        const customerId = customer._id || customer.id;
+        try {
+            await updateCustomerDiscordUsername(customerId, discordUsername);
+        } catch (err) {
+            console.error('Claim update error:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Update Failed')
+                        .setDescription('Could not link your Discord account. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        // Clear cached stats so /stats shows fresh data
+        statsCache.delete(discordUsername.toLowerCase());
+
+        const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
+        const orderCount = typeof customer.order_count === 'number' ? customer.order_count : 0;
+        const tier = getTier(totalSpent);
+        const points = calcLoyaltyPoints(totalSpent);
+
+        await interaction.editReply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Account Linked!')
+                    .setDescription(
+                        `Your Discord account has been linked to the Minecraft username **${mcUsername}**.\n\nYour purchase history is now attached to your Discord profile — use \`/stats view\` to check it out!`,
+                    )
+                    .addFields(
+                        {
+                            name: '🏅 Linked Stats',
+                            value: [
+                                `**Rank:** ${tier.emoji} ${tier.name}`,
+                                `**Total Spent:** $${totalSpent.toFixed(2)}`,
+                                `**Orders:** ${orderCount}`,
+                                `**Loyalty Points:** ${points % 1 === 0 ? points : points.toFixed(1)}/100`,
+                            ].join('\n'),
+                            inline: false,
+                        },
+                    )
+                    .setFooter({ text: 'DonutDemand Bot' })
+                    .setTimestamp(),
+            ],
+        });
+        return;
     }
 
     // /stats
