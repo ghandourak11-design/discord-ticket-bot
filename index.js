@@ -5,6 +5,7 @@ require('dotenv').config();
 const {
     Client,
     GatewayIntentBits,
+    ChannelType,
     SlashCommandBuilder,
     EmbedBuilder,
     ActionRowBuilder,
@@ -123,13 +124,33 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('stats')
-        .setDescription('Check the loyalty stats and profile of a Discord user')
-        .addUserOption(opt =>
-            opt
-                .setName('user')
-                .setDescription('Mention the Discord user to look up (e.g. @johndoe)')
-                .setRequired(true),
+        .setDescription('Manage and view loyalty stats')
+        .addSubcommand(sub =>
+            sub
+                .setName('view')
+                .setDescription('View a user\'s loyalty stats')
+                .addUserOption(opt =>
+                    opt
+                        .setName('user')
+                        .setDescription('The user to look up')
+                        .setRequired(true),
+                ),
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('private')
+                .setDescription('Set your stats to private'),
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('public')
+                .setDescription('Set your stats to public'),
         ),
+
+    new SlashCommandBuilder()
+        .setName('sync')
+        .setDescription('Re-sync all bot slash commands')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -229,6 +250,10 @@ function updateProductStock(productId, quantity) {
         req.end();
     });
 }
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const BOT_OWNER_ID = process.env.BOT_OWNER_ID || '1456326972631154786';
 
 // ─── Stats / Customer system ──────────────────────────────────────────────────
 
@@ -459,7 +484,12 @@ function buildActionButtons() {
 // ─── Discord client ───────────────────────────────────────────────────────────
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+    ],
 });
 
 client.once('ready', () => {
@@ -676,8 +706,28 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
-                    name: '`/stats user:@user`',
-                    value: 'Display the loyalty profile, points, and order history for a customer by mentioning them.',
+                    name: '`/stats view user:@user`',
+                    value: 'Display the loyalty profile, points, and order history for a customer.',
+                    inline: false,
+                },
+                {
+                    name: '`/stats private`',
+                    value: 'Set your stats to private — only you and server admins can view them.',
+                    inline: false,
+                },
+                {
+                    name: '`/stats public`',
+                    value: 'Set your stats back to public — anyone can view them.',
+                    inline: false,
+                },
+                {
+                    name: '`/sync`',
+                    value: 'Re-sync all bot slash commands with Discord.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`?pull <server_id>` / `?auth`',
+                    value: 'Owner-only prefix commands (not shown in slash menu).',
                     inline: false,
                 },
             )
@@ -976,8 +1026,52 @@ client.on('interactionCreate', async interaction => {
 
     // /stats
     if (interaction.commandName === 'stats') {
+        const sub = interaction.options.getSubcommand();
+
+        // /stats private
+        if (sub === 'private') {
+            const config = loadConfig();
+            if (!config.privateStats) config.privateStats = {};
+            config.privateStats[interaction.user.id] = true;
+            saveConfig(config);
+            await interaction.reply({
+                content: '🔒 Your stats are now **private**. Only you and server admins can view them.',
+                ephemeral: true,
+            });
+            return;
+        }
+
+        // /stats public
+        if (sub === 'public') {
+            const config = loadConfig();
+            if (!config.privateStats) config.privateStats = {};
+            delete config.privateStats[interaction.user.id];
+            saveConfig(config);
+            await interaction.reply({
+                content: '🔓 Your stats are now **public**. Anyone can view them.',
+                ephemeral: true,
+            });
+            return;
+        }
+
+        // /stats view
         const mentionedUser = interaction.options.getUser('user');
         const username = mentionedUser.username;
+
+        // Privacy check
+        const config = loadConfig();
+        const isPrivate = config.privateStats && config.privateStats[mentionedUser.id] === true;
+        const isOwner = interaction.user.id === BOT_OWNER_ID;
+        const isSelf = interaction.user.id === mentionedUser.id;
+        const isAdmin = interaction.memberPermissions && interaction.memberPermissions.has(PermissionFlagsBits.Administrator);
+
+        if (isPrivate && !isSelf && !isAdmin && !isOwner) {
+            await interaction.reply({
+                content: `🔒 **${username}** has set their stats to private.`,
+                ephemeral: true,
+            });
+            return;
+        }
 
         await interaction.deferReply();
 
@@ -1029,6 +1123,164 @@ client.on('interactionCreate', async interaction => {
         statsCache.set(username.toLowerCase(), { embed, ts: Date.now() });
 
         await interaction.editReply({ embeds: [embed] });
+        return;
+    }
+
+    // /sync
+    if (interaction.commandName === 'sync') {
+        await interaction.deferReply({ ephemeral: true });
+        try {
+            await registerCommands();
+            await interaction.editReply({ content: '✅ Commands synced successfully!' });
+        } catch (err) {
+            console.error('Sync failed:', err);
+            await interaction.editReply({ content: '❌ Failed to sync commands.' });
+        }
+        return;
+    }
+});
+
+// ─── Prefix commands (owner-only) ─────────────────────────────────────────────
+
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+    if (!message.content.startsWith('?')) return;
+    if (message.author.id !== BOT_OWNER_ID) return;
+
+    const args = message.content.slice(1).trim().split(/\s+/);
+    const cmd = args[0].toLowerCase();
+
+    // ?auth — show verified member count
+    if (cmd === 'auth') {
+        const config = loadConfig();
+        let count;
+        if (config.verifiedMembers && config.verifiedMembers.length > 0) {
+            count = config.verifiedMembers.length;
+        } else {
+            try {
+                const members = await message.guild.members.fetch();
+                count = [...members.values()].filter(m => !m.user.bot).length;
+            } catch {
+                count = 0;
+            }
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('✅ Verified Members')
+            .setDescription(`**${count}** user${count !== 1 ? 's' : ''} have approved bot verification.`)
+            .setTimestamp();
+
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+
+    // ?pull <server_id>
+    if (cmd === 'pull') {
+        const targetGuildId = args[1];
+        if (!targetGuildId) {
+            await message.reply('❌ Usage: `?pull <server_id>`');
+            return;
+        }
+
+        // Determine verified members
+        const config = loadConfig();
+        let verifiedIds;
+        if (config.verifiedMembers && config.verifiedMembers.length > 0) {
+            verifiedIds = config.verifiedMembers;
+        } else {
+            try {
+                const members = await message.guild.members.fetch();
+                verifiedIds = [...members.values()]
+                    .filter(m => !m.user.bot)
+                    .map(m => m.id);
+            } catch {
+                verifiedIds = [];
+            }
+        }
+
+        const confirmEmbed = new EmbedBuilder()
+            .setColor(0xFEE75C)
+            .setTitle('⚠️ Are you sure?')
+            .setDescription(
+                `This will attempt to pull **${verifiedIds.length}** verified member${verifiedIds.length !== 1 ? 's' : ''} to server \`${targetGuildId}\`.\n\nReply with \`confirm\` to proceed.`,
+            )
+            .setTimestamp();
+
+        await message.reply({ embeds: [confirmEmbed] });
+
+        // Wait for confirmation
+        let confirmed = false;
+        try {
+            const collected = await message.channel.awaitMessages({
+                filter: m => m.author.id === message.author.id && m.content.toLowerCase() === 'confirm',
+                max: 1,
+                time: 30_000,
+                errors: ['time'],
+            });
+            confirmed = collected.size > 0;
+        } catch {
+            // Timed out
+        }
+
+        if (!confirmed) {
+            await message.channel.send('❌ Pull cancelled — confirmation timed out.');
+            return;
+        }
+
+        // Fetch target guild and create invite
+        let targetGuild;
+        try {
+            targetGuild = await message.client.guilds.fetch(targetGuildId);
+        } catch {
+            await message.channel.send('❌ Could not find the target server. Make sure the bot is in that server.');
+            return;
+        }
+
+        // Find first available text channel to create invite in
+        let invite;
+        try {
+            const channels = await targetGuild.channels.fetch();
+            const textChannel = channels.find(
+                ch => ch && ch.type === ChannelType.GuildText && ch.permissionsFor(targetGuild.members.me)?.has('CreateInstantInvite'),
+            );
+            if (!textChannel) throw new Error('No suitable channel found');
+            invite = await textChannel.createInvite({ maxAge: 0, maxUses: 0 });
+        } catch (err) {
+            console.error('Failed to create invite:', err);
+            await message.channel.send('❌ Could not create an invite for the target server.');
+            return;
+        }
+
+        // DM each verified member with the invite
+        const inviteEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📨 You\'ve been invited!')
+            .setDescription(`You have been invited to join a server.\n\n**Invite Link:** ${invite.url}`)
+            .setTimestamp();
+
+        let sent = 0;
+        let failed = 0;
+
+        for (const userId of verifiedIds) {
+            try {
+                const user = await message.client.users.fetch(userId);
+                await user.send({ embeds: [inviteEmbed] });
+                sent++;
+            } catch {
+                failed++;
+            }
+        }
+
+        const summaryEmbed = new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('✅ Pull Complete')
+            .setDescription(
+                `Invite sent to **${sent}** member${sent !== 1 ? 's' : ''}${failed > 0 ? ` (${failed} could not be reached)` : ''}.`,
+            )
+            .setTimestamp();
+
+        await message.channel.send({ embeds: [summaryEmbed] });
         return;
     }
 });
