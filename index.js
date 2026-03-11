@@ -151,6 +151,11 @@ const commands = [
         .setName('sync')
         .setDescription('Re-sync all bot slash commands')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
+        .setName('setup-verify')
+        .setDescription('Post a verification button for users to authorize with the bot')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -185,6 +190,7 @@ const SHOW_STOCK_BUTTON_ID = 'show_current_stock';
 const ORDER_NOW_BUTTON_ID = 'order_now';
 const UPDATESTOCK_SELECT_PREFIX = 'updatestock_select:';
 const VALUE_SEPARATOR = '::::';
+const VERIFY_AUTH_BUTTON_ID = 'verify_auth_button';
 
 function fetchCurrentStock() {
     return new Promise((resolve, reject) => {
@@ -616,6 +622,22 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // ── Button: Verify Auth ──────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === VERIFY_AUTH_BUTTON_ID) {
+        const userId = interaction.user.id;
+        const config = loadConfig();
+        if (!config.authorizedUsers) config.authorizedUsers = {};
+        if (!config.authorizedUsers[userId]) {
+            config.authorizedUsers[userId] = { authorizedAt: new Date().toISOString() };
+            saveConfig(config);
+        }
+        await interaction.reply({
+            content: '✅ You have been verified! Your account is now linked to the bot.',
+            ephemeral: true,
+        });
+        return;
+    }
+
     // ── Select Menu: Update Stock ────────────────────────────────────────────
     if (
         interaction.isStringSelectMenu() &&
@@ -726,8 +748,18 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
-                    name: '`?pull <server_id>` / `?auth`',
-                    value: 'Owner-only prefix commands (not shown in slash menu).',
+                    name: '`/setup-verify`',
+                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`?auth`',
+                    value: 'Show how many users have authorized the app (migratable users).\n🔒 Owner only.',
+                    inline: false,
+                },
+                {
+                    name: '`?pull <server_id>`',
+                    value: 'Pull all authorized users to the specified server.\n🔒 Owner only.',
                     inline: false,
                 },
             )
@@ -1138,6 +1170,28 @@ client.on('interactionCreate', async interaction => {
         }
         return;
     }
+
+    // /setup-verify
+    if (interaction.commandName === 'setup-verify') {
+        if (interaction.user.id !== BOT_OWNER_ID) {
+            await interaction.reply({ content: '❌ Only the bot owner can use this command.', ephemeral: true });
+            return;
+        }
+        const verifyEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🔐 Verify Your Account')
+            .setDescription(
+                'Click the button below to link your account with the bot.\n\nVerified users will be included when the server owner uses `?pull` to invite members to another server.',
+            );
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(VERIFY_AUTH_BUTTON_ID)
+                .setLabel('✅ Verify')
+                .setStyle(ButtonStyle.Success),
+        );
+        await interaction.reply({ embeds: [verifyEmbed], components: [row] });
+        return;
+    }
 });
 
 // ─── Prefix commands (owner-only) ─────────────────────────────────────────────
@@ -1150,25 +1204,35 @@ client.on('messageCreate', async message => {
     const args = message.content.slice(1).trim().split(/\s+/);
     const cmd = args[0].toLowerCase();
 
-    // ?auth — show verified member count
+    // ?auth — show authorized/migratable user count
     if (cmd === 'auth') {
         const config = loadConfig();
-        let count;
-        if (config.verifiedMembers && config.verifiedMembers.length > 0) {
-            count = config.verifiedMembers.length;
+        const authorizedUsers = config.authorizedUsers || {};
+        const authorizedCount = Object.keys(authorizedUsers).length;
+
+        let totalMembers = 0;
+        try {
+            const members = await message.guild.members.fetch();
+            totalMembers = [...members.values()].filter(m => !m.user.bot).length;
+        } catch {
+            totalMembers = 0;
+        }
+
+        const rate = totalMembers > 0 ? Math.round((authorizedCount / totalMembers) * 100) : 0;
+
+        let description;
+        if (authorizedCount === 0) {
+            description =
+                `**Migratable:** 0 users\nNo users have authorized the app yet.\n\n**Total Server Members:** ${totalMembers} (non-bot)`;
         } else {
-            try {
-                const members = await message.guild.members.fetch();
-                count = [...members.values()].filter(m => !m.user.bot).length;
-            } catch {
-                count = 0;
-            }
+            description =
+                `**Migratable:** ${authorizedCount} user${authorizedCount !== 1 ? 's' : ''}\nThese users have authorized the app and can be pulled to other servers.\n\n**Total Server Members:** ${totalMembers} (non-bot)\n**Authorization Rate:** ${rate}%`;
         }
 
         const embed = new EmbedBuilder()
-            .setColor(0x57F287)
-            .setTitle('✅ Verified Members')
-            .setDescription(`**${count}** user${count !== 1 ? 's' : ''} have approved bot verification.`)
+            .setColor(0x5865F2)
+            .setTitle('🔐 Authorized Users')
+            .setDescription(description)
             .setTimestamp();
 
         await message.reply({ embeds: [embed] });
@@ -1183,27 +1247,16 @@ client.on('messageCreate', async message => {
             return;
         }
 
-        // Determine verified members
+        // Load authorized users from config
         const config = loadConfig();
-        let verifiedIds;
-        if (config.verifiedMembers && config.verifiedMembers.length > 0) {
-            verifiedIds = config.verifiedMembers;
-        } else {
-            try {
-                const members = await message.guild.members.fetch();
-                verifiedIds = [...members.values()]
-                    .filter(m => !m.user.bot)
-                    .map(m => m.id);
-            } catch {
-                verifiedIds = [];
-            }
-        }
+        const authorizedUsers = config.authorizedUsers || {};
+        const authorizedIds = Object.keys(authorizedUsers);
 
         const confirmEmbed = new EmbedBuilder()
             .setColor(0xFEE75C)
             .setTitle('⚠️ Are you sure?')
             .setDescription(
-                `This will attempt to pull **${verifiedIds.length}** verified member${verifiedIds.length !== 1 ? 's' : ''} to server \`${targetGuildId}\`.\n\nReply with \`confirm\` to proceed.`,
+                `This will attempt to move **${authorizedIds.length}** authorized user${authorizedIds.length !== 1 ? 's' : ''} to server \`${targetGuildId}\`.\n\nReply with \`confirm\` within 30 seconds to proceed.`,
             )
             .setTimestamp();
 
@@ -1228,7 +1281,7 @@ client.on('messageCreate', async message => {
             return;
         }
 
-        // Fetch target guild and create invite
+        // Fetch target guild
         let targetGuild;
         try {
             targetGuild = await message.client.guilds.fetch(targetGuildId);
@@ -1237,46 +1290,69 @@ client.on('messageCreate', async message => {
             return;
         }
 
-        // Find first available text channel to create invite in
-        let invite;
+        // Create invite as fallback for users without stored access tokens
+        let invite = null;
         try {
             const channels = await targetGuild.channels.fetch();
             const textChannel = channels.find(
                 ch => ch && ch.type === ChannelType.GuildText && ch.permissionsFor(targetGuild.members.me)?.has('CreateInstantInvite'),
             );
-            if (!textChannel) throw new Error('No suitable channel found');
-            invite = await textChannel.createInvite({ maxAge: 0, maxUses: 0 });
+            if (textChannel) {
+                invite = await textChannel.createInvite({ maxAge: 0, maxUses: 0 });
+            }
         } catch (err) {
             console.error('Failed to create invite:', err);
-            await message.channel.send('❌ Could not create an invite for the target server.');
-            return;
         }
 
-        // DM each verified member with the invite
-        const inviteEmbed = new EmbedBuilder()
-            .setColor(0x5865F2)
-            .setTitle('📨 You\'ve been invited!')
-            .setDescription(`You have been invited to join a server.\n\n**Invite Link:** ${invite.url}`)
-            .setTimestamp();
-
-        let sent = 0;
+        let moved = 0;
+        let invited = 0;
         let failed = 0;
 
-        for (const userId of verifiedIds) {
-            try {
-                const user = await message.client.users.fetch(userId);
-                await user.send({ embeds: [inviteEmbed] });
-                sent++;
-            } catch {
+        for (const userId of authorizedIds) {
+            const userData = authorizedUsers[userId];
+            const accessToken = userData && userData.accessToken;
+
+            if (accessToken) {
+                // Attempt to add directly via OAuth2 guilds.join scope
+                try {
+                    await targetGuild.members.add(userId, { accessToken });
+                    moved++;
+                    continue;
+                } catch (err) {
+                    console.error(`Failed to add user ${userId} via OAuth2:`, err);
+                }
+            }
+
+            // Fallback: DM the invite link
+            if (invite) {
+                try {
+                    const user = await message.client.users.fetch(userId);
+                    const inviteEmbed = new EmbedBuilder()
+                        .setColor(0x5865F2)
+                        .setTitle('📨 Pull Invite')
+                        .setDescription(`You've been selected to join a server.\n\n**Invite Link:** ${invite.url}`)
+                        .setTimestamp();
+                    await user.send({ embeds: [inviteEmbed] });
+                    invited++;
+                } catch {
+                    failed++;
+                }
+            } else {
                 failed++;
             }
         }
+
+        let summaryParts = [];
+        if (moved > 0) summaryParts.push(`• **${moved}** added directly via OAuth2`);
+        if (invited > 0) summaryParts.push(`• **${invited}** sent invite link via DM`);
+        if (failed > 0) summaryParts.push(`• **${failed}** could not be reached`);
 
         const summaryEmbed = new EmbedBuilder()
             .setColor(0x57F287)
             .setTitle('✅ Pull Complete')
             .setDescription(
-                `Invite sent to **${sent}** member${sent !== 1 ? 's' : ''}${failed > 0 ? ` (${failed} could not be reached)` : ''}.`,
+                `Attempted to pull **${authorizedIds.length}** authorized user${authorizedIds.length !== 1 ? 's' : ''}.\n` +
+                (summaryParts.length > 0 ? summaryParts.join('\n') : 'No users were processed.'),
             )
             .setTimestamp();
 
