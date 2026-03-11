@@ -277,6 +277,22 @@ function buildLoyaltyBar(points) {
     return '🟩'.repeat(filled) + '⬜'.repeat(empty);
 }
 
+const TIERS = [
+    { name: 'Diamond',  color: 0xB9F2FF, emoji: '💎', minSpent: 500 },
+    { name: 'Platinum', color: 0xE5E4E2, emoji: '🏆', minSpent: 200 },
+    { name: 'Gold',     color: 0xFFD700, emoji: '🥇', minSpent: 75  },
+    { name: 'Silver',   color: 0xC0C0C0, emoji: '🥈', minSpent: 25  },
+    { name: 'Bronze',   color: 0xCD7F32, emoji: '🥉', minSpent: 1   },
+    { name: 'Unranked', color: 0x808080, emoji: '🔘', minSpent: 0   },
+];
+
+function getTier(totalSpent) {
+    for (const tier of TIERS) {
+        if (totalSpent >= tier.minSpent) return tier;
+    }
+    return TIERS[TIERS.length - 1]; // Unranked
+}
+
 // Simple in-memory cache to avoid hammering the API
 const statsCache = new Map();
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -352,28 +368,31 @@ function buildStatsEmbed(customer, discordMember) {
     const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
     const loyaltyClaimed = typeof customer.loyalty_dollars_claimed === 'number' ? customer.loyalty_dollars_claimed : 0;
 
+    const tier = getTier(totalSpent);
     const points = calcLoyaltyPoints(orderCount);
     const bar = buildLoyaltyBar(points);
+    const separator = '─'.repeat(30);
 
     const embed = new EmbedBuilder()
-        .setColor(0x1E1F22)
-        .setTitle(`Profile — ${username}`)
-        .setDescription(`🟢 **Loyalty Points: ${points}/100**\n${bar}`)
+        .setColor(tier.color)
+        .setTitle(`${tier.emoji} Profile — ${username}`)
+        .setDescription(`🟢 **Loyalty Points: ${points}/100**\n${bar}\n${separator}`)
         .addFields(
             {
-                name: '📊 Standing',
+                name: '🏅 Standing',
                 value: [
-                    `💰 Total Spent: $${totalSpent.toFixed(2)}`,
-                    `📦 Orders: ${orderCount}`,
-                    `🎁 Loyalty $ Claimed: $${loyaltyClaimed.toFixed(2)}`,
+                    `**Rank:** ${tier.emoji} ${tier.name}`,
+                    `**Total Spent:** $${totalSpent.toFixed(2)}`,
+                    `**Orders:** ${orderCount}`,
+                    `**Loyalty Claimed:** $${loyaltyClaimed.toFixed(2)}`,
                 ].join('\n'),
                 inline: true,
             },
             {
                 name: '📈 Activity',
                 value: [
-                    `🗓️ First Purchase: ${formatDate(customer.first_purchase_date)}`,
-                    `🕐 Last Purchase: ${formatDate(customer.last_purchase_date)}`,
+                    `**First Purchase:** ${formatDate(customer.first_purchase_date)}`,
+                    `**Last Purchase:** ${formatDate(customer.last_purchase_date)}`,
                 ].join('\n'),
                 inline: true,
             },
