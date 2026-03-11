@@ -73,6 +73,17 @@ const commands = [
                         .setDescription('The role to mention in restock notifications')
                         .setRequired(true),
                 ),
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('leader-channel')
+                .setDescription('Set a channel for the auto-updating leaderboard')
+                .addChannelOption(opt =>
+                    opt
+                        .setName('channel')
+                        .setDescription('The channel to post the live leaderboard in')
+                        .setRequired(true),
+                ),
         ),
 
     new SlashCommandBuilder()
@@ -168,6 +179,10 @@ const commands = [
         .setName('sync')
         .setDescription('Re-sync all bot slash commands')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
+        .setName('leader')
+        .setDescription('Display the top 10 spenders leaderboard'),
 
     new SlashCommandBuilder()
         .setName('setup-verify')
@@ -314,16 +329,17 @@ function calcLoyaltyPoints(totalSpent) {
 }
 
 /**
- * Builds a visual progress bar using emoji squares (20 segments wide).
+ * Builds a visual progress bar using Unicode block characters (20 segments wide).
+ * Renders as a clean single-line bar that works well on mobile.
  *
  * @param {number} points  0–100
  * @returns {string}
  */
 function buildLoyaltyBar(points) {
-    const TOTAL_SEGMENTS = 20;
-    const filled = Math.round((points / 100) * TOTAL_SEGMENTS);
-    const empty = TOTAL_SEGMENTS - filled;
-    return '🟩'.repeat(filled) + '⬜'.repeat(empty);
+    const TOTAL_WIDTH = 20;
+    const filled = Math.round((points / 100) * TOTAL_WIDTH);
+    const empty = TOTAL_WIDTH - filled;
+    return '█'.repeat(filled) + '░'.repeat(empty);
 }
 
 const TIERS = [
@@ -459,6 +475,64 @@ function fetchCustomerByMinecraft(mcUsername) {
                         const data = JSON.parse(raw);
                         const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
                         resolve(results.length > 0 ? results[0] : null);
+                    } catch {
+                        reject(new Error('Failed to parse Customer API response'));
+                    }
+                });
+            })
+            .on('error', reject);
+    });
+}
+
+/**
+ * Fetches all customer records from the Base44 Customer API (no filter).
+ *
+ * @returns {Promise<object[]>}  Array of all customer records
+ */
+function fetchAllCustomers() {
+    return new Promise((resolve, reject) => {
+        if (!BASE44_APP_ID) {
+            reject(new Error('BASE44_APP_ID is not configured'));
+            return;
+        }
+
+        if (!STATS_API_KEY) {
+            reject(new Error('BASE44_API_KEY is not configured'));
+            return;
+        }
+
+        let urlObj;
+        try {
+            urlObj = new URL(CUSTOMER_API_URL);
+        } catch {
+            reject(new Error('Customer API URL is not valid'));
+            return;
+        }
+
+        const reqOptions = {
+            hostname: urlObj.hostname,
+            path: urlObj.pathname + urlObj.search,
+            method: 'GET',
+            headers: {
+                'api_key': STATS_API_KEY,
+                'Content-Type': 'application/json',
+            },
+        };
+
+        https
+            .get(reqOptions, res => {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res.resume();
+                    reject(new Error(`Customer API returned status ${res.statusCode}`));
+                    return;
+                }
+                let raw = '';
+                res.on('data', chunk => { raw += chunk; });
+                res.on('end', () => {
+                    try {
+                        const data = JSON.parse(raw);
+                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
+                        resolve(results);
                     } catch {
                         reject(new Error('Failed to parse Customer API response'));
                     }
@@ -619,7 +693,7 @@ function buildStatsEmbed(customer, discordMember) {
     const embed = new EmbedBuilder()
         .setColor(tier.color)
         .setTitle(`${tier.emoji} Profile — ${username}`)
-        .setDescription(`🟢 **Loyalty Points: ${points % 1 === 0 ? points : points.toFixed(1)}/100**\n${bar}\n${separator}`)
+        .setDescription(`🟡 **Loyalty Points: ${points % 1 === 0 ? points : points.toFixed(1)}/100**\n\`${bar}\`\n${separator}`)
         .addFields(
             {
                 name: '🏅 Standing',
@@ -700,6 +774,86 @@ function buildActionButtons() {
     );
 }
 
+// ─── Leaderboard system ───────────────────────────────────────────────────────
+
+const leaderboardCache = new Map();
+const LEADERBOARD_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const LEADERBOARD_UPDATE_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+let leaderboardInterval = null;
+
+const LEADERBOARD_MEDALS = ['🥇', '🥈', '🥉'];
+
+function buildLeaderboardEmbed(customers) {
+    const eligible = customers
+        .filter(c => c.discord_username && c.discord_username.trim() !== '')
+        .sort((a, b) => (b.total_spent || 0) - (a.total_spent || 0))
+        .slice(0, 10);
+
+    if (eligible.length === 0) return null;
+
+    const leaderboardLines = eligible.map((c, i) => {
+        const prefix = i < 3 ? LEADERBOARD_MEDALS[i] : `${i + 1}.`;
+        const spent = (c.total_spent || 0).toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        });
+        return `${prefix} **${c.discord_username}** — $${spent}`;
+    });
+
+    const intervalMinutes = LEADERBOARD_UPDATE_INTERVAL_MS / 60000;
+    return new EmbedBuilder()
+        .setColor(0x1E1F22)
+        .setTitle('🏆 Top 10 Spenders')
+        .setDescription(leaderboardLines.join('\n'))
+        .setFooter({ text: `Updated every ${intervalMinutes} minutes • DonutDemand Bot` })
+        .setTimestamp();
+}
+
+async function updateLeaderboard() {
+    const config = loadConfig();
+    const channelId = config.leaderboardChannelId;
+    if (!channelId) return;
+
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+
+    let customers;
+    try {
+        customers = await fetchAllCustomers();
+    } catch (err) {
+        console.error('Leaderboard update failed:', err);
+        return;
+    }
+
+    const embed = buildLeaderboardEmbed(customers);
+    if (!embed) return;
+
+    const messageId = config.leaderboardMessageId;
+    if (messageId) {
+        try {
+            const msg = await channel.messages.fetch(messageId);
+            await msg.edit({ embeds: [embed] });
+            return;
+        } catch {
+            // Message not found — send a new one below
+        }
+    }
+
+    try {
+        const msg = await channel.send({ embeds: [embed] });
+        config.leaderboardMessageId = msg.id;
+        saveConfig(config);
+    } catch (err) {
+        console.error('Failed to send leaderboard:', err);
+    }
+}
+
+function startLeaderboardInterval() {
+    if (leaderboardInterval) clearInterval(leaderboardInterval);
+    leaderboardInterval = setInterval(updateLeaderboard, LEADERBOARD_UPDATE_INTERVAL_MS);
+    updateLeaderboard();
+}
+
 // ─── Discord client ───────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -713,6 +867,10 @@ const client = new Client({
 
 client.once('ready', () => {
     console.log(`Bot is ready! Logged in as ${client.user.tag}`);
+    const config = loadConfig();
+    if (config.leaderboardChannelId) {
+        startLeaderboardInterval();
+    }
 });
 
 client.on('interactionCreate', async interaction => {
@@ -980,6 +1138,16 @@ client.on('interactionCreate', async interaction => {
                     value: 'Pull all authorized users to the specified server.\n🔒 Owner only.',
                     inline: false,
                 },
+                {
+                    name: '`/leader`',
+                    value: 'Display the top 10 spenders leaderboard.',
+                    inline: false,
+                },
+                {
+                    name: '`/settings leader-channel <#channel>`',
+                    value: 'Set a channel for the auto-updating leaderboard (refreshes every 10 minutes).\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
             )
             .setFooter({ text: 'Use /settings channel first before running /restock.' })
             .setTimestamp();
@@ -1029,6 +1197,33 @@ client.on('interactionCreate', async interaction => {
                     .setTitle('✅ Settings Updated')
                     .setDescription(
                         `<@&${role.id}> will now be pinged on restock notifications.`,
+                    ),
+            ],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // /settings leader-channel
+    if (
+        interaction.commandName === 'settings' &&
+        interaction.options.getSubcommand() === 'leader-channel'
+    ) {
+        const channel = interaction.options.getChannel('channel');
+        const config = loadConfig();
+        config.leaderboardChannelId = channel.id;
+        config.leaderboardMessageId = null;
+        saveConfig(config);
+
+        startLeaderboardInterval();
+
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Leaderboard Channel Set')
+                    .setDescription(
+                        `The auto-updating leaderboard will be posted in <#${channel.id}> and refreshed every 10 minutes.`,
                     ),
             ],
             ephemeral: true,
@@ -1528,6 +1723,52 @@ client.on('interactionCreate', async interaction => {
             console.error('Sync failed:', err);
             await interaction.editReply({ content: '❌ Failed to sync commands.' });
         }
+        return;
+    }
+
+    // /leader
+    if (interaction.commandName === 'leader') {
+        await interaction.deferReply();
+
+        // Serve from cache if still fresh
+        const cachedLeaderboard = leaderboardCache.get('leaderboard');
+        if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
+            await interaction.editReply({ embeds: [cachedLeaderboard.embed] });
+            return;
+        }
+
+        let customers;
+        try {
+            customers = await fetchAllCustomers();
+        } catch (err) {
+            console.error('Leader API error:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ API Unreachable')
+                        .setDescription('Could not fetch customer data. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        const embed = buildLeaderboardEmbed(customers);
+
+        if (!embed) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('🏆 Top 10 Spenders')
+                        .setDescription('No leaderboard data available yet.'),
+                ],
+            });
+            return;
+        }
+
+        leaderboardCache.set('leaderboard', { embed, ts: Date.now() });
+        await interaction.editReply({ embeds: [embed] });
         return;
     }
 
