@@ -188,6 +188,39 @@ const commands = [
         .setName('setup-verify')
         .setDescription('Post a verification button for users to authorize with the bot')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
+        .setName('timezone')
+        .setDescription('Manage staff timezone display')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub =>
+            sub
+                .setName('set')
+                .setDescription('Set your current time and timezone')
+                .addStringOption(opt =>
+                    opt
+                        .setName('current_time')
+                        .setDescription('Your current time right now (e.g. 10:32am, 2:15pm, 14:30)')
+                        .setRequired(true),
+                )
+                .addStringOption(opt =>
+                    opt
+                        .setName('timezone')
+                        .setDescription('Your timezone abbreviation (e.g. EST, PST, GMT, CET)')
+                        .setRequired(true),
+                ),
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('channel')
+                .setDescription('Set the channel for the live staff times display')
+                .addChannelOption(opt =>
+                    opt
+                        .setName('channel')
+                        .setDescription('The channel to display staff times in')
+                        .setRequired(true),
+                ),
+        ),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -854,6 +887,92 @@ function startLeaderboardInterval() {
     updateLeaderboard();
 }
 
+// ─── Timezone system ──────────────────────────────────────────────────────────
+
+const TIMEZONE_UPDATE_INTERVAL_MS = 10 * 1000; // 10 seconds
+let timezoneInterval = null;
+
+/**
+ * Parses a time string into { hours, minutes } in 24-hour format.
+ * Supports formats like "10:32am", "2:15pm", "14:30", "2:15 PM".
+ *
+ * @param {string} timeStr
+ * @returns {{ hours: number, minutes: number }|null}
+ */
+function parseTimeInput(timeStr) {
+    const cleaned = timeStr.trim().toLowerCase().replace(/\s+/g, '');
+    const match = cleaned.match(/^(\d{1,2}):(\d{2})(am|pm)?$/i);
+    if (!match) return null;
+    let hours = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const period = match[3];
+    if (period === 'pm' && hours !== 12) hours += 12;
+    if (period === 'am' && hours === 12) hours = 0;
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+    return { hours, minutes };
+}
+
+function buildTimezoneEmbed(staffTimezones) {
+    const now = new Date();
+
+    const lines = Object.entries(staffTimezones).map(([userId, data]) => {
+        const staffTime = new Date(now.getTime() + data.utcOffsetMinutes * 60000);
+        const timeStr = staffTime.toLocaleTimeString('en-US', {
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+            timeZone: 'UTC',
+        });
+        return `<@${userId}> — **${timeStr}** (${data.timezone})`;
+    });
+
+    return new EmbedBuilder()
+        .setColor(0xFFFDD0)
+        .setTitle('🕐 Staff Times')
+        .setDescription(lines.length > 0 ? lines.join('\n') : 'No staff members have set their timezone yet.')
+        .setFooter({ text: 'Last updated' })
+        .setTimestamp(now);
+}
+
+async function updateTimezoneDisplay() {
+    const config = loadConfig();
+    const channelId = config.timezoneChannelId;
+    if (!channelId) return;
+
+    const staffTimezones = config.staffTimezones || {};
+    if (Object.keys(staffTimezones).length === 0) return;
+
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+
+    const embed = buildTimezoneEmbed(staffTimezones);
+
+    const messageId = config.timezoneMessageId;
+    if (messageId) {
+        try {
+            const msg = await channel.messages.fetch(messageId);
+            await msg.edit({ embeds: [embed] });
+            return;
+        } catch {
+            // Message not found — send new one
+        }
+    }
+
+    try {
+        const msg = await channel.send({ embeds: [embed] });
+        config.timezoneMessageId = msg.id;
+        saveConfig(config);
+    } catch (err) {
+        console.error('Failed to send timezone display:', err);
+    }
+}
+
+function startTimezoneInterval() {
+    if (timezoneInterval) clearInterval(timezoneInterval);
+    timezoneInterval = setInterval(updateTimezoneDisplay, TIMEZONE_UPDATE_INTERVAL_MS);
+    updateTimezoneDisplay();
+}
+
 // ─── Discord client ───────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -870,6 +989,9 @@ client.once('ready', () => {
     const config = loadConfig();
     if (config.leaderboardChannelId) {
         startLeaderboardInterval();
+    }
+    if (config.timezoneChannelId) {
+        startTimezoneInterval();
     }
 });
 
@@ -1146,6 +1268,16 @@ client.on('interactionCreate', async interaction => {
                 {
                     name: '`/settings leader-channel <#channel>`',
                     value: 'Set a channel for the auto-updating leaderboard (refreshes every 10 minutes).\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/timezone set current_time:<time> timezone:<tz>`',
+                    value: 'Set your current local time and timezone for the staff clock display.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/timezone channel <#channel>`',
+                    value: 'Set the channel for the live-updating staff times display.\n🔒 Requires **Administrator** permission.',
                     inline: false,
                 },
             )
@@ -1769,6 +1901,95 @@ client.on('interactionCreate', async interaction => {
 
         leaderboardCache.set('leaderboard', { embed, ts: Date.now() });
         await interaction.editReply({ embeds: [embed] });
+        return;
+    }
+
+    // /timezone set
+    if (interaction.commandName === 'timezone' && interaction.options.getSubcommand() === 'set') {
+        const timeInput = interaction.options.getString('current_time');
+        const timezone = interaction.options.getString('timezone');
+
+        const parsed = parseTimeInput(timeInput);
+        if (!parsed) {
+            await interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Invalid Time Format')
+                        .setDescription('Please use a format like `10:32am`, `2:15pm`, or `14:30`.'),
+                ],
+                ephemeral: true,
+            });
+            return;
+        }
+
+        const now = new Date();
+        const currentUTCMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+        const providedMinutes = parsed.hours * 60 + parsed.minutes;
+        let offsetMinutes = providedMinutes - currentUTCMinutes;
+
+        // Normalize to the valid timezone range: UTC-12 (-720 min) to UTC+14 (+840 min)
+        if (offsetMinutes > 840) offsetMinutes -= 1440;
+        if (offsetMinutes < -720) offsetMinutes += 1440;
+
+        // Round to nearest 15 minutes to account for the few seconds it takes to run the command
+        offsetMinutes = Math.round(offsetMinutes / 15) * 15;
+
+        const config = loadConfig();
+        if (!config.staffTimezones) config.staffTimezones = {};
+        config.staffTimezones[interaction.user.id] = {
+            username: interaction.user.username,
+            timezone: timezone.toUpperCase(),
+            utcOffsetMinutes: offsetMinutes,
+        };
+        saveConfig(config);
+
+        // Format the time for display
+        const displayTime = new Date();
+        displayTime.setUTCHours(0, 0, 0, 0);
+        displayTime.setUTCMinutes(currentUTCMinutes + offsetMinutes);
+        const timeStr = displayTime.toLocaleTimeString('en-US', {
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+            timeZone: 'UTC',
+        });
+
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Timezone Set')
+                    .setDescription(`Your timezone has been set to **${timezone.toUpperCase()}** (current time: **${timeStr}**)`),
+            ],
+            ephemeral: true,
+        });
+
+        if (config.timezoneChannelId) {
+            updateTimezoneDisplay();
+        }
+        return;
+    }
+
+    // /timezone channel
+    if (interaction.commandName === 'timezone' && interaction.options.getSubcommand() === 'channel') {
+        const channel = interaction.options.getChannel('channel');
+        const config = loadConfig();
+        config.timezoneChannelId = channel.id;
+        delete config.timezoneMessageId;
+        saveConfig(config);
+
+        startTimezoneInterval();
+
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Timezone Channel Set')
+                    .setDescription(`Staff times will now be displayed in <#${channel.id}> and update every 10 seconds.`),
+            ],
+            ephemeral: true,
+        });
         return;
     }
 
