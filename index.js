@@ -1450,7 +1450,7 @@ client.on('interactionCreate', async interaction => {
 
         try {
             await paidChannel.send({ embeds: [updatedEmbed] });
-            await interaction.message.edit({ embeds: [updatedEmbed], components: [] });
+            await interaction.message.delete().catch(() => {}); // message may already be deleted
         } catch (err) {
             console.error('Failed to move order to delivered channel:', err);
         }
@@ -1498,7 +1498,7 @@ client.on('interactionCreate', async interaction => {
 
         try {
             await reviewChannel.send({ embeds: [updatedEmbed] });
-            await interaction.message.edit({ embeds: [updatedEmbed], components: [] });
+            await interaction.message.delete().catch(() => {}); // message may already be deleted
         } catch (err) {
             console.error('Failed to move order to review channel:', err);
         }
