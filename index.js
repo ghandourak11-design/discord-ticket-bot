@@ -981,13 +981,43 @@ function buildOrderButtons(orderId) {
 let orderPollInterval = null;
 const seenOrderIds = new Set();
 
-function startOrderPolling() {
+async function seedSeenOrderIds() {
+    let orders;
+    try {
+        orders = await fetchAllOrders();
+    } catch (err) {
+        console.error('seedSeenOrderIds error:', err);
+        return;
+    }
+
+    let dirty = false;
+    for (const order of orders) {
+        const orderId = String(order._id ?? order.id ?? '');
+        if (!orderId) continue;
+        if (!seenOrderIds.has(orderId)) {
+            seenOrderIds.add(orderId);
+            dirty = true;
+        }
+    }
+
+    if (dirty) {
+        const freshConfig = loadConfig();
+        freshConfig.seenOrderIds = [...seenOrderIds];
+        saveConfig(freshConfig);
+    }
+}
+
+async function startOrderPolling() {
     const config = loadConfig();
     if (Array.isArray(config.seenOrderIds)) {
         for (const id of config.seenOrderIds) {
             seenOrderIds.add(String(id));
         }
     }
+
+    // Seed all existing orders as "seen" before starting to poll
+    await seedSeenOrderIds();
+
     if (orderPollInterval) clearInterval(orderPollInterval);
     orderPollInterval = setInterval(pollOrders, ORDER_POLL_INTERVAL_MS);
 }
@@ -2339,7 +2369,7 @@ client.on('interactionCreate', async interaction => {
         config.orderChannelId = channel.id;
         saveConfig(config);
 
-        startOrderPolling();
+        await startOrderPolling();
 
         await interaction.reply({
             embeds: [
