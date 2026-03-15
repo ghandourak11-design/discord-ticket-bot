@@ -221,6 +221,54 @@ const commands = [
                         .setRequired(true),
                 ),
         ),
+
+    new SlashCommandBuilder()
+        .setName('order')
+        .setDescription('Configure the order notification channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub =>
+            sub
+                .setName('channel')
+                .setDescription('Set the channel for new order notifications')
+                .addChannelOption(opt =>
+                    opt
+                        .setName('channel')
+                        .setDescription('The channel to post new order notifications in')
+                        .setRequired(true),
+                ),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('paid')
+        .setDescription('Configure the delivered orders channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub =>
+            sub
+                .setName('channel')
+                .setDescription('Set the channel for delivered orders')
+                .addChannelOption(opt =>
+                    opt
+                        .setName('channel')
+                        .setDescription('The channel to move orders to when marked as delivered')
+                        .setRequired(true),
+                ),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('review')
+        .setDescription('Configure the orders-needing-review channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub =>
+            sub
+                .setName('channel')
+                .setDescription('Set the channel for orders needing review')
+                .addChannelOption(opt =>
+                    opt
+                        .setName('channel')
+                        .setDescription('The channel to move orders to when they need review')
+                        .setRequired(true),
+                ),
+        ),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -256,6 +304,7 @@ const ORDER_NOW_BUTTON_ID = 'order_now';
 const UPDATESTOCK_SELECT_PREFIX = 'updatestock_select:';
 const VALUE_SEPARATOR = '::::';
 const VERIFY_AUTH_BUTTON_ID = 'verify_auth_button';
+const ORDER_POLL_INTERVAL_MS = 3 * 1000; // 3 seconds
 
 function fetchCurrentStock() {
     return new Promise((resolve, reject) => {
@@ -664,6 +713,64 @@ function fetchOrdersByMinecraft(mcUsername) {
 }
 
 /**
+ * Fetches all orders from the Base44 Order API (no filter).
+ *
+ * @returns {Promise<object[]>}  Array of all order records
+ */
+function fetchAllOrders() {
+    return new Promise((resolve, reject) => {
+        if (!BASE44_APP_ID) {
+            reject(new Error('BASE44_APP_ID is not configured'));
+            return;
+        }
+
+        if (!STATS_API_KEY) {
+            reject(new Error('BASE44_API_KEY is not configured'));
+            return;
+        }
+
+        let urlObj;
+        try {
+            urlObj = new URL(ORDER_API_URL);
+        } catch {
+            reject(new Error('Order API URL is not valid'));
+            return;
+        }
+
+        const reqOptions = {
+            hostname: urlObj.hostname,
+            path: urlObj.pathname + urlObj.search,
+            method: 'GET',
+            headers: {
+                'api_key': STATS_API_KEY,
+                'Content-Type': 'application/json',
+            },
+        };
+
+        https
+            .get(reqOptions, res => {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res.resume();
+                    reject(new Error(`Order API returned status ${res.statusCode}`));
+                    return;
+                }
+                let raw = '';
+                res.on('data', chunk => { raw += chunk; });
+                res.on('end', () => {
+                    try {
+                        const data = JSON.parse(raw);
+                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
+                        resolve(results);
+                    } catch {
+                        reject(new Error('Failed to parse Order API response'));
+                    }
+                });
+            })
+            .on('error', reject);
+    });
+}
+
+/**
  * Updates the discord_username field on a customer record.
  *
  * @param {string} customerId
@@ -807,7 +914,125 @@ function buildActionButtons() {
     );
 }
 
-// ─── Leaderboard system ───────────────────────────────────────────────────────
+// ─── Order notification helpers ───────────────────────────────────────────────
+
+function buildOrderEmbed(order) {
+    const productName = order.product_name ?? order.product ?? order.item_name ?? 'Unknown Product';
+    const rawPrice = order.amount_total ?? order.total ?? order.amount ?? order.order_total ?? order.price_paid ?? null;
+    const pricePaid = rawPrice !== null ? `$${rawPrice}` : 'Unknown';
+    const minecraftUsername = order.minecraft_username ?? order.mc_username ?? order.player_name ?? order.ign ?? 'Unknown';
+    const discordUsername = order.discord_username ?? order.discord_user ?? order.discord_name ?? 'Unknown';
+    const quantity = order.quantity ?? order.product_quantity ?? 1;
+    const discountCode = order.discount_code ?? order.coupon_code ?? order.coupon ?? order.discount ?? order.promo_code ?? null;
+
+    const embed = new EmbedBuilder()
+        .setColor(0xFFA500)
+        .setTitle('🍩 New Order!')
+        .addFields(
+            {
+                name: 'Order',
+                value: `${quantity}x ${productName}`,
+                inline: false,
+            },
+            {
+                name: 'Price Paid',
+                value: pricePaid,
+                inline: true,
+            },
+            {
+                name: 'Minecraft Username',
+                value: `\`${minecraftUsername}\``,
+                inline: true,
+            },
+            {
+                name: 'Discord Username',
+                value: `\`${discordUsername}\``,
+                inline: true,
+            },
+        )
+        .setTimestamp();
+
+    if (discountCode) {
+        embed.addFields({
+            name: 'Discount Code',
+            value: `\`${discountCode}\``,
+            inline: true,
+        });
+    }
+
+    return embed;
+}
+
+function buildOrderButtons(orderId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`order_delivered:${orderId}`)
+            .setLabel('✅ Delivered')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId(`order_review:${orderId}`)
+            .setLabel('🔍 Needs Review')
+            .setStyle(ButtonStyle.Danger),
+    );
+}
+
+// ─── Order polling system ─────────────────────────────────────────────────────
+
+let orderPollInterval = null;
+const seenOrderIds = new Set();
+
+function startOrderPolling() {
+    const config = loadConfig();
+    if (Array.isArray(config.seenOrderIds)) {
+        for (const id of config.seenOrderIds) {
+            seenOrderIds.add(String(id));
+        }
+    }
+    if (orderPollInterval) clearInterval(orderPollInterval);
+    orderPollInterval = setInterval(pollOrders, ORDER_POLL_INTERVAL_MS);
+}
+
+async function pollOrders() {
+    const config = loadConfig();
+    const channelId = config.orderChannelId;
+    if (!channelId) return;
+
+    let orders;
+    try {
+        orders = await fetchAllOrders();
+    } catch (err) {
+        console.error('Order poll error:', err);
+        return;
+    }
+
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+
+    let dirty = false;
+    for (const order of orders) {
+        const orderId = String(order._id ?? order.id ?? '');
+        if (!orderId) continue;
+        if (seenOrderIds.has(orderId)) continue;
+
+        const embed = buildOrderEmbed(order);
+        const row = buildOrderButtons(orderId);
+        try {
+            await channel.send({ embeds: [embed], components: [row] });
+            seenOrderIds.add(orderId);
+            dirty = true;
+        } catch (err) {
+            console.error('Failed to post order notification:', err);
+        }
+    }
+
+    if (dirty) {
+        const freshConfig = loadConfig();
+        freshConfig.seenOrderIds = [...seenOrderIds];
+        saveConfig(freshConfig);
+    }
+}
+
+
 
 const leaderboardCache = new Map();
 const LEADERBOARD_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -992,6 +1217,9 @@ client.once('ready', () => {
     }
     if (config.timezoneChannelId) {
         startTimezoneInterval();
+    }
+    if (config.orderChannelId) {
+        startOrderPolling();
     }
 });
 
@@ -1181,6 +1409,102 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // ── Button: Order Delivered ──────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('order_delivered:')) {
+        await interaction.deferUpdate();
+
+        const config = loadConfig();
+        const paidChannelId = config.paidChannelId;
+
+        if (!paidChannelId) {
+            await interaction.followUp({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ No Delivered Channel Set')
+                        .setDescription('Please run `/paid channel` first to configure the delivered orders channel.'),
+                ],
+                ephemeral: true,
+            });
+            return;
+        }
+
+        const paidChannel = await interaction.client.channels.fetch(paidChannelId).catch(() => null);
+        if (!paidChannel) {
+            await interaction.followUp({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Channel Not Found')
+                        .setDescription('The configured delivered orders channel could not be found.'),
+                ],
+                ephemeral: true,
+            });
+            return;
+        }
+
+        const originalEmbed = interaction.message.embeds[0];
+        const updatedEmbed = EmbedBuilder.from(originalEmbed)
+            .setColor(0x57F287)
+            .setTitle('✅ Order Delivered');
+
+        try {
+            await paidChannel.send({ embeds: [updatedEmbed] });
+            await interaction.message.edit({ embeds: [updatedEmbed], components: [] });
+        } catch (err) {
+            console.error('Failed to move order to delivered channel:', err);
+        }
+        return;
+    }
+
+    // ── Button: Order Needs Review ───────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('order_review:')) {
+        await interaction.deferUpdate();
+
+        const config = loadConfig();
+        const reviewChannelId = config.reviewChannelId;
+
+        if (!reviewChannelId) {
+            await interaction.followUp({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ No Review Channel Set')
+                        .setDescription('Please run `/review channel` first to configure the review orders channel.'),
+                ],
+                ephemeral: true,
+            });
+            return;
+        }
+
+        const reviewChannel = await interaction.client.channels.fetch(reviewChannelId).catch(() => null);
+        if (!reviewChannel) {
+            await interaction.followUp({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Channel Not Found')
+                        .setDescription('The configured review channel could not be found.'),
+                ],
+                ephemeral: true,
+            });
+            return;
+        }
+
+        const originalEmbed = interaction.message.embeds[0];
+        const updatedEmbed = EmbedBuilder.from(originalEmbed)
+            .setColor(0xFEE75C)
+            .setTitle('🔍 Order Needs Review');
+
+        try {
+            await reviewChannel.send({ embeds: [updatedEmbed] });
+            await interaction.message.edit({ embeds: [updatedEmbed], components: [] });
+        } catch (err) {
+            console.error('Failed to move order to review channel:', err);
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     // /help
@@ -1278,6 +1602,21 @@ client.on('interactionCreate', async interaction => {
                 {
                     name: '`/timezone channel <#channel>`',
                     value: 'Set the channel for the live-updating staff times display.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/order channel <#channel>`',
+                    value: 'Set the channel where new order notifications are posted.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/paid channel <#channel>`',
+                    value: 'Set the channel where orders are forwarded when marked as **Delivered**.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/review channel <#channel>`',
+                    value: 'Set the channel where orders are forwarded when marked as **Needs Review**.\n🔒 Requires **Administrator** permission.',
                     inline: false,
                 },
             )
@@ -1987,6 +2326,65 @@ client.on('interactionCreate', async interaction => {
                     .setColor(0x57F287)
                     .setTitle('✅ Timezone Channel Set')
                     .setDescription(`Staff times will now be displayed in <#${channel.id}> and update every 10 seconds.`),
+            ],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // /order channel
+    if (interaction.commandName === 'order' && interaction.options.getSubcommand() === 'channel') {
+        const channel = interaction.options.getChannel('channel');
+        const config = loadConfig();
+        config.orderChannelId = channel.id;
+        saveConfig(config);
+
+        startOrderPolling();
+
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Order Channel Set')
+                    .setDescription(`New order notifications will be posted in <#${channel.id}>.`),
+            ],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // /paid channel
+    if (interaction.commandName === 'paid' && interaction.options.getSubcommand() === 'channel') {
+        const channel = interaction.options.getChannel('channel');
+        const config = loadConfig();
+        config.paidChannelId = channel.id;
+        saveConfig(config);
+
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Delivered Channel Set')
+                    .setDescription(`Delivered orders will be sent to <#${channel.id}>.`),
+            ],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // /review channel
+    if (interaction.commandName === 'review' && interaction.options.getSubcommand() === 'channel') {
+        const channel = interaction.options.getChannel('channel');
+        const config = loadConfig();
+        config.reviewChannelId = channel.id;
+        saveConfig(config);
+
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Review Channel Set')
+                    .setDescription(`Orders needing review will be sent to <#${channel.id}>.`),
             ],
             ephemeral: true,
         });
