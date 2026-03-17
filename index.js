@@ -1274,6 +1274,7 @@ client.on('interactionCreate', async interaction => {
                 attachment: Buffer.from(transcript.content, 'utf-8'),
                 name: `transcript-${transcript.channelName}-${transcriptId}.txt`,
             }],
+            ephemeral: true,
         });
         return;
     }
