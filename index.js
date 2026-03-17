@@ -14,6 +14,7 @@ const {
     StringSelectMenuBuilder,
     StringSelectMenuOptionBuilder,
     PermissionFlagsBits,
+    AuditLogEvent,
     REST,
     Routes,
 } = require('discord.js');
@@ -376,6 +377,7 @@ function updateProductStock(productId, quantity) {
 const BOT_OWNER_ID = process.env.BOT_OWNER_ID || '1456326972631154786';
 const TRANSCRIPT_BUTTON_PREFIX = 'view_transcript:';
 const TRANSCRIPT_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+const AUDIT_LOG_MAX_AGE_MS = 10000; // 10 seconds — max age of audit log entry to match
 const transcriptStore = new Map();
 
 // ─── Stats / Customer system ──────────────────────────────────────────────────
@@ -2472,12 +2474,30 @@ client.on('channelDelete', async channel => {
     if (!channel.guild || !channel.isTextBased()) return;
 
     try {
+        // Try to find who deleted the channel from the audit log
+        let closedBy = 'Unknown';
+        try {
+            const auditLogs = await channel.guild.fetchAuditLogs({
+                type: AuditLogEvent.ChannelDelete,
+                limit: 5,
+            });
+            const entry = auditLogs.entries.find(
+                e => e.target?.id === channel.id && Date.now() - e.createdTimestamp < AUDIT_LOG_MAX_AGE_MS,
+            );
+            if (entry && entry.executor) {
+                closedBy = `${entry.executor.tag} (${entry.executor.id})`;
+            }
+        } catch {
+            // Audit log not accessible — keep "Unknown"
+        }
+
         // Only cached messages are available; the channel no longer exists on Discord's API
         const messages = [...channel.messages.cache.values()]
             .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 
         let transcript = `Transcript for #${channel.name} (${channel.id})\n`;
         transcript += `Server: ${channel.guild.name}\n`;
+        transcript += `Closed by: ${closedBy}\n`;
         transcript += `Deleted at: ${new Date().toUTCString()}\n`;
         transcript += `Messages: ${messages.length}\n`;
         transcript += '─'.repeat(50) + '\n\n';
@@ -2511,9 +2531,15 @@ client.on('channelDelete', async channel => {
         setTimeout(() => transcriptStore.delete(transcriptId), TRANSCRIPT_EXPIRY_MS);
 
         const embed = new EmbedBuilder()
-            .setColor(0x5865F2)
-            .setTitle('🗑️ Channel Deleted')
-            .setDescription(`**#${channel.name}** was deleted in **${channel.guild.name}**.\nMessages cached: **${messages.length}**`)
+            .setColor(0xED4245)
+            .setTitle('🎫 Ticket Closed')
+            .setDescription(
+                `**Channel:** #${channel.name}\n` +
+                `**Server:** ${channel.guild.name}\n` +
+                `**Closed by:** ${closedBy}\n` +
+                `**Messages:** ${messages.length}`,
+            )
+            .setFooter({ text: 'Click the button below to view the full transcript' })
             .setTimestamp();
 
         const row = new ActionRowBuilder().addComponents(
