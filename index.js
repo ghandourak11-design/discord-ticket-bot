@@ -374,6 +374,9 @@ function updateProductStock(productId, quantity) {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const BOT_OWNER_ID = process.env.BOT_OWNER_ID || '1456326972631154786';
+const TRANSCRIPT_BUTTON_PREFIX = 'view_transcript:';
+const TRANSCRIPT_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+const transcriptStore = new Map();
 
 // ─── Stats / Customer system ──────────────────────────────────────────────────
 
@@ -1254,6 +1257,25 @@ client.once('ready', () => {
 });
 
 client.on('interactionCreate', async interaction => {
+    // ── Button: View Transcript ──────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith(TRANSCRIPT_BUTTON_PREFIX)) {
+        const transcriptId = interaction.customId.slice(TRANSCRIPT_BUTTON_PREFIX.length);
+        const transcript = transcriptStore.get(transcriptId);
+
+        if (!transcript) {
+            await interaction.reply({ content: '❌ Transcript expired or not found.', ephemeral: true });
+            return;
+        }
+
+        await interaction.reply({
+            files: [{
+                attachment: Buffer.from(transcript.content, 'utf-8'),
+                name: `transcript-${transcript.channelName}-${transcriptId}.txt`,
+            }],
+        });
+        return;
+    }
+
     // ── Button: Show Current Stock ───────────────────────────────────────────
     if (interaction.isButton() && interaction.customId === SHOW_STOCK_BUTTON_ID) {
         await interaction.deferReply({ ephemeral: true });
@@ -2441,6 +2463,70 @@ client.on('interactionCreate', async interaction => {
         );
         await interaction.reply({ embeds: [verifyEmbed], components: [row] });
         return;
+    }
+});
+
+// ─── Channel Delete: Transcript to owner ──────────────────────────────────────
+
+client.on('channelDelete', async channel => {
+    if (!channel.guild || !channel.isTextBased()) return;
+
+    try {
+        // Only cached messages are available; the channel no longer exists on Discord's API
+        const messages = [...channel.messages.cache.values()]
+            .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+
+        let transcript = `Transcript for #${channel.name} (${channel.id})\n`;
+        transcript += `Server: ${channel.guild.name}\n`;
+        transcript += `Deleted at: ${new Date().toUTCString()}\n`;
+        transcript += `Messages: ${messages.length}\n`;
+        transcript += '─'.repeat(50) + '\n\n';
+
+        if (messages.length === 0) {
+            transcript += '(No cached messages available)\n';
+        } else {
+            for (const msg of messages) {
+                const time = msg.createdAt.toUTCString();
+                const author = msg.author ? `${msg.author.tag} (${msg.author.id})` : 'Unknown';
+                transcript += `[${time}] ${author}\n`;
+                if (msg.content) transcript += `${msg.content}\n`;
+                if (msg.attachments.size > 0) {
+                    for (const [, att] of msg.attachments) {
+                        transcript += `[Attachment: ${att.name} - ${att.url}]\n`;
+                    }
+                }
+                if (msg.embeds.length > 0) {
+                    for (const embed of msg.embeds) {
+                        if (embed.title) transcript += `[Embed Title: ${embed.title}]\n`;
+                        if (embed.description) transcript += `[Embed Description: ${embed.description}]\n`;
+                    }
+                }
+                transcript += '\n';
+            }
+        }
+
+        const transcriptId = `${channel.id}-${Date.now()}`;
+        transcriptStore.set(transcriptId, { content: transcript, channelName: channel.name });
+
+        setTimeout(() => transcriptStore.delete(transcriptId), TRANSCRIPT_EXPIRY_MS);
+
+        const embed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🗑️ Channel Deleted')
+            .setDescription(`**#${channel.name}** was deleted in **${channel.guild.name}**.\nMessages cached: **${messages.length}**`)
+            .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`${TRANSCRIPT_BUTTON_PREFIX}${transcriptId}`)
+                .setLabel('📋 View Transcript')
+                .setStyle(ButtonStyle.Primary),
+        );
+
+        const user = await client.users.fetch(BOT_OWNER_ID);
+        await user.send({ embeds: [embed], components: [row] });
+    } catch (err) {
+        console.error('Failed to send channel delete transcript:', err);
     }
 });
 
