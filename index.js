@@ -431,7 +431,7 @@ function updateProduct(productId, fields) {
         const options = {
             hostname: apiUrl.hostname,
             path: apiUrl.pathname,
-            method: 'PATCH',
+            method: 'PUT',
             headers: {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(body),
@@ -441,8 +441,11 @@ function updateProduct(productId, fields) {
 
         const req = https.request(options, res => {
             if (res.statusCode < 200 || res.statusCode >= 300) {
-                res.resume();
-                reject(new Error(`Update API returned status ${res.statusCode}`));
+                let errBody = '';
+                res.on('data', chunk => { errBody += chunk; });
+                res.on('end', () => {
+                    reject(new Error(`Update API returned status ${res.statusCode}: ${errBody}`));
+                });
                 return;
             }
             let data = '';
@@ -932,7 +935,7 @@ function updateCustomerDiscordUsername(customerId, discordUsername) {
         const options = {
             hostname: apiUrl.hostname,
             path: apiUrl.pathname,
-            method: 'PATCH',
+            method: 'PUT',
             headers: {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(body),
@@ -942,8 +945,11 @@ function updateCustomerDiscordUsername(customerId, discordUsername) {
 
         const req = https.request(options, res => {
             if (res.statusCode < 200 || res.statusCode >= 300) {
-                res.resume();
-                reject(new Error(`Customer API returned status ${res.statusCode}`));
+                let errBody = '';
+                res.on('data', chunk => { errBody += chunk; });
+                res.on('end', () => {
+                    reject(new Error(`Customer API returned status ${res.statusCode}: ${errBody}`));
+                });
                 return;
             }
             let data = '';
