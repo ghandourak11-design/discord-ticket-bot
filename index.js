@@ -1821,7 +1821,7 @@ client.on('interactionCreate', async interaction => {
         const helpEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle('📋 Bot Commands')
-            .setDescription('Here is a list of all available commands:')
+            .setDescription('Here is a list of all available commands.\nAll commands also work with the `!` prefix (e.g. `!help`, `!stats @user`).')
             .addFields(
                 {
                     name: '`/help`',
@@ -1890,7 +1890,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '`/setup-verify`',
-                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Requires **Administrator** permission.',
+                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Owner only.',
                     inline: false,
                 },
                 {
@@ -2959,7 +2959,895 @@ client.on('channelDelete', async channel => {
     }
 });
 
-// ─── Prefix commands (owner-only) ─────────────────────────────────────────────
+// ─── Prefix commands (! prefix — mirrors most slash commands) ─────────────────
+
+const PREFIX = '!';
+
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+    if (!message.content.startsWith(PREFIX)) return;
+
+    const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+    const cmd = args.shift().toLowerCase();
+
+    // ── !help ─────────────────────────────────────────────────────────────────
+    if (cmd === 'help') {
+        const helpEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📋 Bot Commands')
+            .setDescription('Here is a list of all available commands.\nAll commands work with both `/` slash and `!` prefix.')
+            .addFields(
+                {
+                    name: '`!help`',
+                    value: 'Show this command list.',
+                    inline: false,
+                },
+                {
+                    name: '`!settings channel <#channel>`',
+                    value: 'Set the channel where restock notifications are sent.\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!settings role <@role>`',
+                    value: 'Set the role to ping in restock notifications.\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!settings leader-channel <#channel>`',
+                    value: 'Set a channel for the auto-updating leaderboard (refreshes every 10 minutes).\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!restock <product> <quantity>`',
+                    value: 'Send a restock notification embed to the configured channel.\n🔒 Requires **Manage Server** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!announce <message>`',
+                    value: 'Send an announcement DM to all members.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!claim <minecraft_username> <amount>`',
+                    value: 'Link your Discord account to your purchase history. Provide the Minecraft username you used at checkout and your most recent order amount in USD for verification.',
+                    inline: false,
+                },
+                {
+                    name: '`!stats @user`',
+                    value: 'Display the loyalty profile, points, and order history for a customer.',
+                    inline: false,
+                },
+                {
+                    name: '`!stats private`',
+                    value: 'Set your stats to private — only you and server admins can view them.',
+                    inline: false,
+                },
+                {
+                    name: '`!stats public`',
+                    value: 'Set your stats back to public — anyone can view them.',
+                    inline: false,
+                },
+                {
+                    name: '`!leader`',
+                    value: 'Display the top 10 spenders leaderboard.',
+                    inline: false,
+                },
+                {
+                    name: '`!sync`',
+                    value: 'Re-sync all bot slash commands with Discord.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!setup-verify`',
+                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Owner only.',
+                    inline: false,
+                },
+                {
+                    name: '`!timezone set <time> <tz>`',
+                    value: 'Set your current local time and timezone for the staff clock display.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!timezone channel <#channel>`',
+                    value: 'Set the channel for the live-updating staff times display.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!order channel <#channel>`',
+                    value: 'Set the channel where new order notifications are posted.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!paid channel <#channel>`',
+                    value: 'Set the channel where orders are forwarded when marked as **Delivered**.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`!review channel <#channel>`',
+                    value: 'Set the channel where orders are forwarded when marked as **Needs Review**.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`?auth`',
+                    value: 'Show how many users have authorized the app (migratable users).\n🔒 Owner only.',
+                    inline: false,
+                },
+                {
+                    name: '`?pull <server_id>`',
+                    value: 'Pull all authorized users to the specified server.\n🔒 Owner only.',
+                    inline: false,
+                },
+            )
+            .setFooter({ text: 'Use !settings channel first before running !restock.' })
+            .setTimestamp();
+
+        await message.reply({ embeds: [helpEmbed] });
+        return;
+    }
+
+    // ── !stats ────────────────────────────────────────────────────────────────
+    if (cmd === 'stats') {
+        const sub = args[0] ? args[0].toLowerCase() : null;
+
+        // !stats private
+        if (sub === 'private') {
+            const config = loadConfig();
+            if (!config.privateStats) config.privateStats = {};
+            config.privateStats[message.author.id] = true;
+            saveConfig(config);
+            await message.reply('🔒 Your stats are now **private**. Only you and server admins can view them.');
+            return;
+        }
+
+        // !stats public
+        if (sub === 'public') {
+            const config = loadConfig();
+            if (!config.privateStats) config.privateStats = {};
+            delete config.privateStats[message.author.id];
+            saveConfig(config);
+            await message.reply('🔓 Your stats are now **public**. Anyone can view them.');
+            return;
+        }
+
+        // !stats @user  (or !stats view @user)
+        let mentionedUser = message.mentions.users.first();
+        if (!mentionedUser) {
+            await message.reply('❌ Usage: `!stats @user`, `!stats private`, or `!stats public`');
+            return;
+        }
+        const username = mentionedUser.username;
+
+        // Privacy check
+        const config = loadConfig();
+        const isPrivate = config.privateStats && config.privateStats[mentionedUser.id] === true;
+        const isOwner = message.author.id === BOT_OWNER_ID;
+        const isSelf = message.author.id === mentionedUser.id;
+        const isAdmin = message.member && message.member.permissions.has(PermissionFlagsBits.Administrator);
+
+        if (isPrivate && !isSelf && !isAdmin && !isOwner) {
+            await message.reply(`🔒 **${username}** has set their stats to private.`);
+            return;
+        }
+
+        // Return cached result if still fresh
+        const cached = statsCache.get(username.toLowerCase());
+        if (cached && Date.now() - cached.ts < STATS_CACHE_TTL_MS) {
+            await message.reply({ embeds: [cached.embed] });
+            return;
+        }
+
+        let customer;
+        try {
+            const claimedMcUsername = config.claimedAccounts && config.claimedAccounts[username];
+            if (claimedMcUsername) {
+                customer = await fetchCustomerByMinecraft(claimedMcUsername);
+            } else {
+                customer = await fetchCustomerData(username);
+            }
+        } catch (err) {
+            console.error('Stats API error:', err);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ API Unreachable')
+                        .setDescription('Could not fetch customer data. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        if (!customer) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('No Data Found')
+                        .setDescription(`No customer data found for **${username}**.`),
+                ],
+            });
+            return;
+        }
+
+        let discordMember = null;
+        try {
+            discordMember = await message.guild.members.fetch(mentionedUser.id);
+        } catch {
+            // Non-critical
+        }
+
+        const embed = buildStatsEmbed(customer, discordMember);
+        statsCache.set(username.toLowerCase(), { embed, ts: Date.now() });
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+
+    // ── !leader ───────────────────────────────────────────────────────────────
+    if (cmd === 'leader') {
+        const cachedLeaderboard = leaderboardCache.get('leaderboard');
+        if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
+            await message.reply({ embeds: [cachedLeaderboard.embed] });
+            return;
+        }
+
+        let customers;
+        try {
+            customers = await fetchAllCustomers();
+        } catch (err) {
+            console.error('Leader API error:', err);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ API Unreachable')
+                        .setDescription('Could not fetch customer data. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        const embed = buildLeaderboardEmbed(customers);
+        if (!embed) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('🏆 Top 10 Spenders')
+                        .setDescription('No leaderboard data available yet.'),
+                ],
+            });
+            return;
+        }
+
+        leaderboardCache.set('leaderboard', { embed, ts: Date.now() });
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+
+    // ── !claim <minecraft_username> <amount> ──────────────────────────────────
+    if (cmd === 'claim') {
+        const mcUsername = args[0];
+        const providedAmount = parseFloat(args[1]);
+
+        if (!mcUsername || isNaN(providedAmount) || providedAmount < 0) {
+            await message.reply('❌ Usage: `!claim <minecraft_username> <amount>`');
+            return;
+        }
+
+        const discordUsername = message.author.username;
+
+        let customer;
+        try {
+            customer = await fetchCustomerByMinecraft(mcUsername);
+        } catch (err) {
+            console.error('Claim API error:', err);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ API Unreachable')
+                        .setDescription('Could not fetch customer data. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        if (!customer) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('❌ No Customer Found')
+                        .setDescription('No customer found with that Minecraft username.'),
+                ],
+            });
+            return;
+        }
+
+        let orders;
+        try {
+            orders = await fetchOrdersByMinecraft(mcUsername);
+        } catch (err) {
+            console.error('Claim orders API error:', err);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ API Unreachable')
+                        .setDescription('Could not fetch order data. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        if (!orders || orders.length === 0) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('❌ No Orders Found')
+                        .setDescription('No orders found for that Minecraft username.'),
+                ],
+            });
+            return;
+        }
+
+        const sortedOrders = [...orders].sort((a, b) => getOrderDate(b) - getOrderDate(a));
+        const mostRecentOrder = sortedOrders[0];
+        const actualAmount = getOrderAmount(mostRecentOrder);
+
+        if (actualAmount === null) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Verification Failed')
+                        .setDescription('Could not read the order amount from your most recent order. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        if (Math.abs(providedAmount - actualAmount) > 0.10) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Verification Failed')
+                        .setDescription('The order amount you provided doesn\'t match the most recent order for that Minecraft username. Please double-check and try again.'),
+                ],
+            });
+            return;
+        }
+
+        const config = loadConfig();
+        if (!config.claimedAccounts) config.claimedAccounts = {};
+        config.claimedAccounts[discordUsername] = mcUsername;
+        saveConfig(config);
+
+        statsCache.delete(discordUsername.toLowerCase());
+
+        const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
+        const orderCount = typeof customer.order_count === 'number' ? customer.order_count : 0;
+        const tier = getTier(totalSpent);
+        const points = calcLoyaltyPoints(totalSpent);
+
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Account Linked!')
+                    .setDescription(
+                        `Your Discord account has been linked to the Minecraft username **${mcUsername}**.\n\nYour purchase history is now attached to your Discord profile — use \`!stats @you\` to check it out!`,
+                    )
+                    .addFields(
+                        {
+                            name: '🏅 Linked Stats',
+                            value: [
+                                `**Rank:** ${tier.emoji} ${tier.name}`,
+                                `**Total Spent:** $${totalSpent.toFixed(2)}`,
+                                `**Orders:** ${orderCount}`,
+                                `**Loyalty Points:** ${points % 1 === 0 ? points : points.toFixed(1)}/100`,
+                            ].join('\n'),
+                            inline: false,
+                        },
+                    )
+                    .setFooter({ text: 'DonutDemand Bot' })
+                    .setTimestamp(),
+            ],
+        });
+        return;
+    }
+
+    // ── !sync (Administrator only) ────────────────────────────────────────────
+    if (cmd === 'sync') {
+        if (!message.member || !message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await message.reply('❌ You need **Administrator** permission to use this command.');
+            return;
+        }
+        try {
+            await registerCommands();
+            await message.reply('✅ Commands synced successfully!');
+        } catch (err) {
+            console.error('Sync failed:', err);
+            await message.reply('❌ Failed to sync commands.');
+        }
+        return;
+    }
+
+    // ── !restock <product> <quantity> (Manage Server) ─────────────────────────
+    if (cmd === 'restock') {
+        if (!message.member || !message.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+            await message.reply('❌ You need **Manage Server** permission to use this command.');
+            return;
+        }
+
+        // Last arg is the quantity, everything before is the product name
+        if (args.length < 2) {
+            await message.reply('❌ Usage: `!restock <product name> <quantity>`');
+            return;
+        }
+
+        const quantity = parseInt(args[args.length - 1], 10);
+        if (isNaN(quantity) || quantity < 1) {
+            await message.reply('❌ Quantity must be a positive integer.');
+            return;
+        }
+        const product = args.slice(0, -1).join(' ');
+
+        const config = loadConfig();
+        const channelId = config.notificationChannelId;
+
+        if (!channelId) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ No Notification Channel Set')
+                        .setDescription('Please run `!settings channel #channel` first to configure the notification channel.'),
+                ],
+            });
+            return;
+        }
+
+        const notifChannel = await message.client.channels.fetch(channelId).catch(() => null);
+        if (!notifChannel) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Channel Not Found')
+                        .setDescription('The configured notification channel could not be found. Please run `!settings channel` again.'),
+                ],
+            });
+            return;
+        }
+
+        const restockEmbed = buildRestockEmbed(product, quantity);
+        const row = buildActionButtons();
+        const roleId = config.notificationRoleId;
+        const content = roleId ? `<@&${roleId}>` : undefined;
+
+        await notifChannel.send({ content, embeds: [restockEmbed], components: [row] });
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Restock Notification Sent')
+                    .setDescription(`Notification sent to <#${channelId}>.`),
+            ],
+        });
+        return;
+    }
+
+    // ── !announce <message> (Administrator) ───────────────────────────────────
+    if (cmd === 'announce') {
+        if (!message.member || !message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await message.reply('❌ You need **Administrator** permission to use this command.');
+            return;
+        }
+
+        const announceText = args.join(' ');
+        if (!announceText) {
+            await message.reply('❌ Usage: `!announce <message>`');
+            return;
+        }
+
+        let members;
+        try {
+            members = await message.guild.members.fetch();
+        } catch (err) {
+            console.error('Failed to fetch guild members:', err);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Failed to Fetch Members')
+                        .setDescription('Could not retrieve server members. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
+        const targets = [...members.values()].filter(m => !m.user.bot);
+        const total = targets.length;
+
+        const statusMessage = await message.channel.send(
+            `📢 Announcement in progress... Sent to 0/${total} members`,
+        );
+
+        const announceEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📢 Server Announcement')
+            .setDescription(announceText)
+            .setFooter({ text: `From ${message.guild.name}` })
+            .setTimestamp();
+
+        let sent = 0;
+        let failed = 0;
+        const DM_DELAY_MS = 1000;
+        const MAX_RETRIES = 3;
+        const RATE_LIMIT_BUFFER_MS = 500;
+
+        for (let i = 0; i < targets.length; i++) {
+            const member = targets[i];
+            let retries = 0;
+            let success = false;
+            while (retries < MAX_RETRIES && !success) {
+                try {
+                    await member.user.send({ embeds: [announceEmbed] });
+                    success = true;
+                    sent++;
+                } catch (err) {
+                    const retryAfter = err?.rawError?.retry_after ?? err?.retry_after;
+                    if (retryAfter) {
+                        const waitMs = Math.ceil(retryAfter * 1000) + RATE_LIMIT_BUFFER_MS;
+                        await new Promise(resolve => setTimeout(resolve, waitMs));
+                        retries++;
+                    } else {
+                        failed++;
+                        break;
+                    }
+                }
+            }
+            if (!success && retries >= MAX_RETRIES) failed++;
+
+            await statusMessage.edit(
+                `📢 Announcement in progress... Sent to ${sent}/${total} members`,
+            );
+
+            if (i < targets.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, DM_DELAY_MS));
+            }
+        }
+
+        await statusMessage.edit(
+            `✅ Announcement sent to ${sent}/${total} members${failed > 0 ? ` (${failed} could not be reached)` : ''}`,
+        );
+
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Announcement Sent')
+                    .setDescription(
+                        `Announcement delivered to **${sent}** member${sent !== 1 ? 's' : ''}${failed > 0 ? ` (${failed} could not be reached)` : ''}.`,
+                    ),
+            ],
+        });
+        return;
+    }
+
+    // ── !settings channel/role/leader-channel (Manage Server) ─────────────────
+    if (cmd === 'settings') {
+        if (!message.member || !message.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+            await message.reply('❌ You need **Manage Server** permission to use this command.');
+            return;
+        }
+
+        const sub = args[0] ? args[0].toLowerCase() : null;
+
+        // !settings channel #channel
+        if (sub === 'channel') {
+            const channel = message.mentions.channels.first();
+            if (!channel) {
+                await message.reply('❌ Usage: `!settings channel #channel`');
+                return;
+            }
+            const config = loadConfig();
+            config.notificationChannelId = channel.id;
+            saveConfig(config);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('✅ Settings Updated')
+                        .setDescription(`Restock notifications will now be sent to <#${channel.id}>.`),
+                ],
+            });
+            return;
+        }
+
+        // !settings role @role
+        if (sub === 'role') {
+            const role = message.mentions.roles.first();
+            if (!role) {
+                await message.reply('❌ Usage: `!settings role @role`');
+                return;
+            }
+            const config = loadConfig();
+            config.notificationRoleId = role.id;
+            saveConfig(config);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('✅ Settings Updated')
+                        .setDescription(`<@&${role.id}> will now be pinged on restock notifications.`),
+                ],
+            });
+            return;
+        }
+
+        // !settings leader-channel #channel
+        if (sub === 'leader-channel') {
+            const channel = message.mentions.channels.first();
+            if (!channel) {
+                await message.reply('❌ Usage: `!settings leader-channel #channel`');
+                return;
+            }
+            const config = loadConfig();
+            config.leaderboardChannelId = channel.id;
+            config.leaderboardMessageId = null;
+            saveConfig(config);
+            startLeaderboardInterval();
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('✅ Leaderboard Channel Set')
+                        .setDescription(
+                            `The auto-updating leaderboard will be posted in <#${channel.id}> and refreshed every 10 minutes.`,
+                        ),
+                ],
+            });
+            return;
+        }
+
+        await message.reply('❌ Usage: `!settings channel #channel`, `!settings role @role`, or `!settings leader-channel #channel`');
+        return;
+    }
+
+    // ── !setup-verify (Owner only) ────────────────────────────────────────────
+    if (cmd === 'setup-verify') {
+        if (message.author.id !== BOT_OWNER_ID) {
+            await message.reply('❌ Only the bot owner can use this command.');
+            return;
+        }
+        const verifyEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🔐 Verify Your Account')
+            .setDescription(
+                'Click the button below to link your account with the bot.\n\nVerified users will be included when the server owner uses `?pull` to invite members to another server.',
+            );
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(VERIFY_AUTH_BUTTON_ID)
+                .setLabel('✅ Verify')
+                .setStyle(ButtonStyle.Success),
+        );
+        await message.reply({ embeds: [verifyEmbed], components: [row] });
+        return;
+    }
+
+    // ── !timezone set/channel (Administrator) ─────────────────────────────────
+    if (cmd === 'timezone') {
+        if (!message.member || !message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await message.reply('❌ You need **Administrator** permission to use this command.');
+            return;
+        }
+
+        const sub = args[0] ? args[0].toLowerCase() : null;
+
+        // !timezone set <current_time> <timezone>
+        if (sub === 'set') {
+            const timeInput = args[1];
+            const timezone = args[2];
+            if (!timeInput || !timezone) {
+                await message.reply('❌ Usage: `!timezone set <current_time> <timezone>`  (e.g. `!timezone set 10:32am EST`)');
+                return;
+            }
+
+            const parsed = parseTimeInput(timeInput);
+            if (!parsed) {
+                await message.reply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor(0xED4245)
+                            .setTitle('❌ Invalid Time Format')
+                            .setDescription('Please use a format like `10:32am`, `2:15pm`, or `14:30`.'),
+                    ],
+                });
+                return;
+            }
+
+            const now = new Date();
+            const currentUTCMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+            const providedMinutes = parsed.hours * 60 + parsed.minutes;
+            let offsetMinutes = providedMinutes - currentUTCMinutes;
+
+            if (offsetMinutes > 840) offsetMinutes -= 1440;
+            if (offsetMinutes < -720) offsetMinutes += 1440;
+            offsetMinutes = Math.round(offsetMinutes / 15) * 15;
+
+            const config = loadConfig();
+            if (!config.staffTimezones) config.staffTimezones = {};
+            config.staffTimezones[message.author.id] = {
+                username: message.author.username,
+                timezone: timezone.toUpperCase(),
+                utcOffsetMinutes: offsetMinutes,
+            };
+            saveConfig(config);
+
+            const displayTime = new Date();
+            displayTime.setUTCHours(0, 0, 0, 0);
+            displayTime.setUTCMinutes(currentUTCMinutes + offsetMinutes);
+            const timeStr = displayTime.toLocaleTimeString('en-US', {
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true,
+                timeZone: 'UTC',
+            });
+
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('✅ Timezone Set')
+                        .setDescription(`Your timezone has been set to **${timezone.toUpperCase()}** (current time: **${timeStr}**)`),
+                ],
+            });
+
+            if (config.timezoneChannelId) {
+                updateTimezoneDisplay();
+            }
+            return;
+        }
+
+        // !timezone channel #channel
+        if (sub === 'channel') {
+            const channel = message.mentions.channels.first();
+            if (!channel) {
+                await message.reply('❌ Usage: `!timezone channel #channel`');
+                return;
+            }
+
+            const config = loadConfig();
+            config.timezoneChannelId = channel.id;
+            delete config.timezoneMessageId;
+            saveConfig(config);
+            startTimezoneInterval();
+
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('✅ Timezone Channel Set')
+                        .setDescription(`Staff times will now be displayed in <#${channel.id}> and update every 10 seconds.`),
+                ],
+            });
+            return;
+        }
+
+        await message.reply('❌ Usage: `!timezone set <time> <tz>` or `!timezone channel #channel`');
+        return;
+    }
+
+    // ── !order channel #channel (Administrator) ───────────────────────────────
+    if (cmd === 'order') {
+        if (!message.member || !message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await message.reply('❌ You need **Administrator** permission to use this command.');
+            return;
+        }
+
+        const sub = args[0] ? args[0].toLowerCase() : null;
+        if (sub !== 'channel') {
+            await message.reply('❌ Usage: `!order channel #channel`');
+            return;
+        }
+
+        const channel = message.mentions.channels.first();
+        if (!channel) {
+            await message.reply('❌ Usage: `!order channel #channel`');
+            return;
+        }
+
+        const config = loadConfig();
+        config.orderChannelId = channel.id;
+        saveConfig(config);
+        await startOrderPolling();
+
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Order Channel Set')
+                    .setDescription(`New order notifications will be posted in <#${channel.id}>.`),
+            ],
+        });
+        return;
+    }
+
+    // ── !paid channel #channel (Administrator) ────────────────────────────────
+    if (cmd === 'paid') {
+        if (!message.member || !message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await message.reply('❌ You need **Administrator** permission to use this command.');
+            return;
+        }
+
+        const sub = args[0] ? args[0].toLowerCase() : null;
+        if (sub !== 'channel') {
+            await message.reply('❌ Usage: `!paid channel #channel`');
+            return;
+        }
+
+        const channel = message.mentions.channels.first();
+        if (!channel) {
+            await message.reply('❌ Usage: `!paid channel #channel`');
+            return;
+        }
+
+        const config = loadConfig();
+        config.paidChannelId = channel.id;
+        saveConfig(config);
+
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Delivered Channel Set')
+                    .setDescription(`Delivered orders will be sent to <#${channel.id}>.`),
+            ],
+        });
+        return;
+    }
+
+    // ── !review channel #channel (Administrator) ──────────────────────────────
+    if (cmd === 'review') {
+        if (!message.member || !message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await message.reply('❌ You need **Administrator** permission to use this command.');
+            return;
+        }
+
+        const sub = args[0] ? args[0].toLowerCase() : null;
+        if (sub !== 'channel') {
+            await message.reply('❌ Usage: `!review channel #channel`');
+            return;
+        }
+
+        const channel = message.mentions.channels.first();
+        if (!channel) {
+            await message.reply('❌ Usage: `!review channel #channel`');
+            return;
+        }
+
+        const config = loadConfig();
+        config.reviewChannelId = channel.id;
+        saveConfig(config);
+
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Review Channel Set')
+                    .setDescription(`Orders needing review will be sent to <#${channel.id}>.`),
+            ],
+        });
+        return;
+    }
+});
+
+// ─── Prefix commands (owner-only, ? prefix) ──────────────────────────────────
 
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
