@@ -1890,7 +1890,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '`/setup-verify`',
-                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Requires **Administrator** permission.',
+                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Owner only.',
                     inline: false,
                 },
                 {
@@ -3039,7 +3039,7 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '`!setup-verify`',
-                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Requires **Administrator** permission.',
+                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Owner only.',
                     inline: false,
                 },
                 {
@@ -3473,7 +3473,7 @@ client.on('messageCreate', async message => {
         const total = targets.length;
 
         const statusMessage = await message.channel.send(
-            `📢 Announcement in progress... Sent to 0/${total} all members`,
+            `📢 Announcement in progress... Sent to 0/${total} members`,
         );
 
         const announceEmbed = new EmbedBuilder()
@@ -3513,7 +3513,7 @@ client.on('messageCreate', async message => {
             if (!success && retries >= MAX_RETRIES) failed++;
 
             await statusMessage.edit(
-                `📢 Announcement in progress... Sent to ${sent}/${total} all members`,
+                `📢 Announcement in progress... Sent to ${sent}/${total} members`,
             );
 
             if (i < targets.length - 1) {
@@ -3522,7 +3522,7 @@ client.on('messageCreate', async message => {
         }
 
         await statusMessage.edit(
-            `✅ Announcement sent to ${sent}/${total} all members${failed > 0 ? ` (${failed} could not be reached)` : ''}`,
+            `✅ Announcement sent to ${sent}/${total} members${failed > 0 ? ` (${failed} could not be reached)` : ''}`,
         );
 
         await message.reply({
