@@ -135,6 +135,74 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
+        .setName('addproduct')
+        .setDescription('Add a new product to the store')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt
+                .setName('name')
+                .setDescription('Product name (e.g. "1M DonutSMP Money")')
+                .setRequired(true),
+        )
+        .addNumberOption(opt =>
+            opt
+                .setName('price')
+                .setDescription('Product price in USD (e.g. 9.99)')
+                .setRequired(true)
+                .setMinValue(0),
+        )
+        .addIntegerOption(opt =>
+            opt
+                .setName('quantity')
+                .setDescription('Initial stock quantity')
+                .setRequired(true)
+                .setMinValue(0),
+        )
+        .addStringOption(opt =>
+            opt
+                .setName('category')
+                .setDescription('Product category (e.g. "Ranks", "Items", "Currency")')
+                .setRequired(false),
+        )
+        .addStringOption(opt =>
+            opt
+                .setName('description')
+                .setDescription('Product description')
+                .setRequired(false),
+        )
+        .addStringOption(opt =>
+            opt
+                .setName('image_url')
+                .setDescription('Product image URL')
+                .setRequired(false),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('editproduct')
+        .setDescription('Edit an existing product (select from dropdown, then update fields)')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt
+                .setName('field')
+                .setDescription('The field to update')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Name', value: 'name' },
+                    { name: 'Price', value: 'price' },
+                    { name: 'Quantity', value: 'quantity' },
+                    { name: 'Category', value: 'category' },
+                    { name: 'Description', value: 'description' },
+                    { name: 'Image URL', value: 'image_url' },
+                ),
+        )
+        .addStringOption(opt =>
+            opt
+                .setName('value')
+                .setDescription('The new value to set')
+                .setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
         .setName('stats')
         .setDescription('Manage and view loyalty stats')
         .addSubcommand(sub =>
@@ -297,45 +365,68 @@ async function registerCommands() {
 
 // ─── Restock embed & button builder ──────────────────────────────────────────
 
-const STOCK_API_URL =
-    'https://app.base44.com/api/apps/698bba4e9e06a075e7c32be6/entities/Product';
+const PRODUCT_API_URL =
+    `${(process.env.BASE44_API_URL || 'https://app.base44.com').replace(/\/$/, '')}/api/apps/${process.env.BASE44_APP_ID || '698bba4e9e06a075e7c32be6'}/entities/Product`;
 
 const SHOW_STOCK_BUTTON_ID = 'show_current_stock';
 const ORDER_NOW_BUTTON_ID = 'order_now';
 const UPDATESTOCK_SELECT_PREFIX = 'updatestock_select:';
+const EDITPRODUCT_SELECT_PREFIX = 'editproduct_select:';
 const VALUE_SEPARATOR = '::::';
 const VERIFY_AUTH_BUTTON_ID = 'verify_auth_button';
 const ORDER_POLL_INTERVAL_MS = 3 * 1000; // 3 seconds
 
 function fetchCurrentStock() {
     return new Promise((resolve, reject) => {
-        https
-            .get(STOCK_API_URL, res => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    res.resume();
-                    reject(new Error(`Stock API returned status ${res.statusCode}`));
-                    return;
+        const apiUrl = new URL(PRODUCT_API_URL);
+        const options = {
+            hostname: apiUrl.hostname,
+            path: apiUrl.pathname + apiUrl.search,
+            method: 'GET',
+            headers: {
+                'api_key': STATS_API_KEY,
+            },
+        };
+
+        const req = https.request(options, res => {
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                res.resume();
+                reject(new Error(`Stock API returned status ${res.statusCode}`));
+                return;
+            }
+            let data = '';
+            res.on('data', chunk => {
+                data += chunk;
+            });
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch (err) {
+                    reject(new Error('Failed to parse stock API response'));
                 }
-                let data = '';
-                res.on('data', chunk => {
-                    data += chunk;
-                });
-                res.on('end', () => {
-                    try {
-                        resolve(JSON.parse(data));
-                    } catch (err) {
-                        reject(new Error('Failed to parse stock API response'));
-                    }
-                });
-            })
-            .on('error', reject);
+            });
+        });
+
+        req.on('error', reject);
+        req.end();
     });
 }
 
 function updateProductStock(productId, quantity) {
+    return updateProduct(productId, { quantity });
+}
+
+/**
+ * Updates one or more fields on a product record.
+ *
+ * @param {string} productId
+ * @param {object} fields  – key/value pairs to update (e.g. { quantity: 5, price: 9.99 })
+ * @returns {Promise<object>}
+ */
+function updateProduct(productId, fields) {
     return new Promise((resolve, reject) => {
-        const apiUrl = new URL(`${STOCK_API_URL}/${encodeURIComponent(productId)}`);
-        const body = JSON.stringify({ quantity });
+        const apiUrl = new URL(`${PRODUCT_API_URL}/${encodeURIComponent(productId)}`);
+        const body = JSON.stringify(fields);
 
         const options = {
             hostname: apiUrl.hostname,
@@ -344,6 +435,7 @@ function updateProductStock(productId, quantity) {
             headers: {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(body),
+                'api_key': STATS_API_KEY,
             },
         };
 
@@ -372,6 +464,53 @@ function updateProductStock(productId, quantity) {
     });
 }
 
+/**
+ * Creates a new product via the Base44 Product API.
+ *
+ * @param {object} fields  – product data (e.g. { name, category, description, price, quantity, image_url })
+ * @returns {Promise<object>}
+ */
+function createProduct(fields) {
+    return new Promise((resolve, reject) => {
+        const apiUrl = new URL(PRODUCT_API_URL);
+        const body = JSON.stringify(fields);
+
+        const options = {
+            hostname: apiUrl.hostname,
+            path: apiUrl.pathname,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(body),
+                'api_key': STATS_API_KEY,
+            },
+        };
+
+        const req = https.request(options, res => {
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                res.resume();
+                reject(new Error(`Create Product API returned status ${res.statusCode}`));
+                return;
+            }
+            let data = '';
+            res.on('data', chunk => {
+                data += chunk;
+            });
+            res.on('end', () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch {
+                    resolve({});
+                }
+            });
+        });
+
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+    });
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const BOT_OWNER_ID = process.env.BOT_OWNER_ID || '1456326972631154786';
@@ -379,6 +518,9 @@ const TRANSCRIPT_BUTTON_PREFIX = 'view_transcript:';
 const TRANSCRIPT_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 const AUDIT_LOG_MAX_AGE_MS = 10000; // 10 seconds — max age of audit log entry to match
 const transcriptStore = new Map();
+
+// Temporary store for /editproduct select-menu payloads (avoids Discord 100-char customId limit)
+const pendingEdits = new Map();
 
 // ─── Stats / Customer system ──────────────────────────────────────────────────
 
@@ -1464,6 +1606,112 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // ── Select Menu: Edit Product ────────────────────────────────────────────
+    if (
+        interaction.isStringSelectMenu() &&
+        interaction.customId.startsWith(EDITPRODUCT_SELECT_PREFIX)
+    ) {
+        await interaction.deferReply({ ephemeral: true });
+
+        // customId = "editproduct_select:<editKey>"
+        const editKey = interaction.customId.slice(EDITPRODUCT_SELECT_PREFIX.length);
+        const editData = pendingEdits.get(editKey);
+
+        if (!editData) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Edit Expired')
+                        .setDescription('This edit session has expired. Please run `/editproduct` again.'),
+                ],
+            });
+            return;
+        }
+
+        pendingEdits.delete(editKey);
+        const { field, value: rawValue } = editData;
+
+        const selectedValue = interaction.values[0];
+        const separatorIdx = selectedValue.indexOf(VALUE_SEPARATOR);
+        const productId = separatorIdx !== -1
+            ? selectedValue.slice(0, separatorIdx)
+            : selectedValue;
+        const productName = separatorIdx !== -1
+            ? selectedValue.slice(separatorIdx + VALUE_SEPARATOR.length)
+            : selectedValue;
+
+        // Convert value to proper type for numeric fields
+        let parsedValue = rawValue;
+        if (field === 'price') {
+            parsedValue = parseFloat(rawValue);
+            if (isNaN(parsedValue) || parsedValue < 0) {
+                await interaction.editReply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor(0xED4245)
+                            .setTitle('❌ Invalid Price')
+                            .setDescription('Price must be a valid positive number.'),
+                    ],
+                });
+                return;
+            }
+        } else if (field === 'quantity') {
+            parsedValue = parseInt(rawValue, 10);
+            if (isNaN(parsedValue) || parsedValue < 0) {
+                await interaction.editReply({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor(0xED4245)
+                            .setTitle('❌ Invalid Quantity')
+                            .setDescription('Quantity must be a valid non-negative integer.'),
+                    ],
+                });
+                return;
+            }
+        }
+
+        const fieldLabels = {
+            name: 'Name',
+            price: 'Price',
+            quantity: 'Quantity',
+            category: 'Category',
+            description: 'Description',
+            image_url: 'Image URL',
+        };
+
+        try {
+            await updateProduct(productId, { [field]: parsedValue });
+        } catch (err) {
+            console.error('Edit product API error:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Update Failed')
+                        .setDescription(
+                            'Could not update the product. Please try again later.',
+                        ),
+                ],
+            });
+            return;
+        }
+
+        const displayValue = field === 'price' ? `$${parsedValue}` : String(parsedValue);
+
+        await interaction.editReply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Product Updated')
+                    .setDescription(
+                        `**${productName}** — **${fieldLabels[field] || field}** has been set to **${displayValue}**.`,
+                    ),
+            ],
+        });
+        return;
+    }
+
     // ── Button: Order Delivered ──────────────────────────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('order_delivered:')) {
         await interaction.deferUpdate();
@@ -1597,6 +1845,16 @@ client.on('interactionCreate', async interaction => {
                 {
                     name: '`/updatestock quantity:<n>`',
                     value: 'Select a product from a dropdown and set its stock to a new quantity.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/addproduct name:<name> price:<$> quantity:<n> [category:<cat>] [description:<text>] [image_url:<url>]`',
+                    value: 'Add a new product to the store with a name, price, and quantity. Optionally set a category, description, and image.\n🔒 Requires **Administrator** permission.',
+                    inline: false,
+                },
+                {
+                    name: '`/editproduct field:<field> value:<new_value>`',
+                    value: 'Select a product from a dropdown and update one of its fields (Name, Price, Quantity, Category, Description, or Image URL).\n🔒 Requires **Administrator** permission.',
                     inline: false,
                 },
                 {
@@ -1988,6 +2246,144 @@ client.on('interactionCreate', async interaction => {
                     .setTitle('📦 Update Stock')
                     .setDescription(
                         `Select a product below to set its stock to **${quantity}** unit${quantity !== 1 ? 's' : ''}.` +
+                        (products.length > 25 ? `\n\n⚠️ Only the first 25 of ${products.length} products are shown.` : ''),
+                    ),
+            ],
+            components: [row],
+        });
+    }
+
+    // /addproduct
+    if (interaction.commandName === 'addproduct') {
+        await interaction.deferReply({ ephemeral: true });
+
+        const name = interaction.options.getString('name');
+        const price = interaction.options.getNumber('price');
+        const quantity = interaction.options.getInteger('quantity');
+        const category = interaction.options.getString('category') || '';
+        const description = interaction.options.getString('description') || '';
+        const image_url = interaction.options.getString('image_url') || '';
+
+        const productData = { name, price, quantity };
+        if (category) productData.category = category;
+        if (description) productData.description = description;
+        if (image_url) productData.image_url = image_url;
+
+        try {
+            const created = await createProduct(productData);
+            const productId = created._id || created.id || 'N/A';
+
+            const embed = new EmbedBuilder()
+                .setColor(0x57F287)
+                .setTitle('✅ Product Created')
+                .setDescription(`**${name}** has been added to the store.`)
+                .addFields(
+                    { name: 'Price', value: `$${price.toFixed(2)}`, inline: true },
+                    { name: 'Quantity', value: `${quantity}`, inline: true },
+                );
+            if (category) embed.addFields({ name: 'Category', value: category, inline: true });
+            if (description) embed.addFields({ name: 'Description', value: description, inline: false });
+            if (image_url) embed.setThumbnail(image_url);
+            embed.setFooter({ text: `Product ID: ${productId}` });
+
+            await interaction.editReply({ embeds: [embed] });
+        } catch (err) {
+            console.error('Create product API error:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ Product Creation Failed')
+                        .setDescription(
+                            'Could not create the product. Please try again later.',
+                        ),
+                ],
+            });
+        }
+    }
+
+    // /editproduct
+    if (interaction.commandName === 'editproduct') {
+        const field = interaction.options.getString('field');
+        const rawValue = interaction.options.getString('value');
+
+        await interaction.deferReply({ ephemeral: true });
+
+        let products;
+        try {
+            products = await fetchCurrentStock();
+        } catch (err) {
+            console.error('Stock API error:', err);
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('❌ API Unreachable')
+                        .setDescription(
+                            'Could not fetch products from the inventory. Please try again later.',
+                        ),
+                ],
+            });
+            return;
+        }
+
+        if (!Array.isArray(products) || products.length === 0) {
+            await interaction.editReply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('📦 No Products Found')
+                        .setDescription('No products were found in the inventory.'),
+                ],
+            });
+            return;
+        }
+
+        // Discord select menus support at most 25 options
+        const productSlice = products.slice(0, 25);
+
+        const options = productSlice.map(p => {
+            const name = p.name || p.title || p.product_name || 'Unknown Product';
+            const id = String(p._id || p.id || name);
+            const label = name.length > 100 ? name.slice(0, 100) : name;
+            const maxNameLen = 100 - id.length - VALUE_SEPARATOR.length;
+            const value = maxNameLen > 0
+                ? `${id}${VALUE_SEPARATOR}${name.slice(0, maxNameLen)}`
+                : id.slice(0, 100);
+            return new StringSelectMenuOptionBuilder()
+                .setLabel(label)
+                .setValue(value);
+        });
+
+        // Encode field and value using a short unique key to avoid Discord 100-char customId limit
+        const editKey = `${interaction.user.id}_${Date.now()}`;
+        pendingEdits.set(editKey, { field, value: rawValue });
+        // Auto-expire after 5 minutes
+        setTimeout(() => pendingEdits.delete(editKey), 5 * 60 * 1000);
+
+        const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId(`${EDITPRODUCT_SELECT_PREFIX}${editKey}`)
+            .setPlaceholder('Select a product to edit…')
+            .addOptions(options);
+
+        const row = new ActionRowBuilder().addComponents(selectMenu);
+
+        const fieldLabels = {
+            name: 'Name',
+            price: 'Price',
+            quantity: 'Quantity',
+            category: 'Category',
+            description: 'Description',
+            image_url: 'Image URL',
+        };
+
+        await interaction.editReply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x5865F2)
+                    .setTitle('✏️ Edit Product')
+                    .setDescription(
+                        `Select a product below to set its **${fieldLabels[field] || field}** to **${rawValue}**.` +
                         (products.length > 25 ? `\n\n⚠️ Only the first 25 of ${products.length} products are shown.` : ''),
                     ),
             ],
