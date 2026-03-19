@@ -2732,4 +2732,9 @@ if (!token) {
     process.exit(1);
 }
 
-registerCommands().then(() => client.login(token));
+registerCommands()
+    .then(() => client.login(token))
+    .catch(err => {
+        console.error('Failed to start the bot:', err);
+        process.exit(1);
+    });
