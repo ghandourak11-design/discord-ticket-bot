@@ -2353,7 +2353,7 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
-    if (!interaction.isChatInputCommand()) return;
+    if (!(interaction.isChatInputCommand() || interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit())) return;
 
     // /help
     if (interaction.commandName === 'help') {
