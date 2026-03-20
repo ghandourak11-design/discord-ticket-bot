@@ -468,6 +468,13 @@ const commands = [
         .setName('unstick')
         .setDescription('Remove the sticky message from this channel')
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
+
+    new SlashCommandBuilder()
+        .setName('vouches')
+        .setDescription('Show the total number of vouches in the configured vouch channel')
+        .addUserOption(opt =>
+            opt.setName('user').setDescription('User to check vouches for (optional)').setRequired(false),
+        ),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -1698,6 +1705,32 @@ async function cacheGuildInvites(guild) {
     }
 }
 
+// Helper: HTTP request for invite API calls
+function inviteApiRequest(method, url, body) {
+    return new Promise((resolve, reject) => {
+        const parsedUrl = new URL(url);
+        const options = {
+            hostname: parsedUrl.hostname,
+            port: parsedUrl.port || 443,
+            path: parsedUrl.pathname + parsedUrl.search,
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+                'api_key': STATS_API_KEY,
+            },
+        };
+        if (body) options.headers['Content-Length'] = Buffer.byteLength(body);
+        const req = https.request(options, res => {
+            let data = '';
+            res.on('data', chunk => { data += chunk; });
+            res.on('end', () => resolve({ status: res.statusCode, body: data }));
+        });
+        req.on('error', reject);
+        if (body) req.write(body);
+        req.end();
+    });
+}
+
 // ─── Ticket Panel System ──────────────────────────────────────────────────────
 
 // Generate a short unique ID for ticket types
@@ -1848,6 +1881,68 @@ client.once('ready', async () => {
     reloadGiveawayTimers();
     // Cache guild invites for invite tracking
     await Promise.all([...client.guilds.cache.values()].map(guild => cacheGuildInvites(guild)));
+
+    // Live invite count sync to Base44 every 60 seconds
+    setInterval(async () => {
+        if (!BASE44_APP_ID || !STATS_API_KEY) return;
+        const INVITE_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Invite`;
+        const invData = loadInvites();
+
+        // Collect all user entries to sync
+        const syncEntries = [];
+        for (const [guildId, guildData] of Object.entries(invData)) {
+            if (!guildData.users) continue;
+            const guild = client.guilds.cache.get(guildId);
+            for (const [userId, counts] of Object.entries(guildData.users)) {
+                syncEntries.push({ guildId, guild, userId, counts });
+            }
+        }
+
+        // Process entries sequentially to avoid hammering the API
+        for (const { guildId, guild, userId, counts } of syncEntries) {
+            const total = (counts.real || 0) + (counts.bonus || 0) - (counts.left || 0);
+            let username = userId;
+            try {
+                const member = guild ? await guild.members.fetch(userId).catch(() => null) : null;
+                if (member) username = member.user.username;
+                else {
+                    const user = await client.users.fetch(userId).catch(() => null);
+                    if (user) username = user.username;
+                }
+            } catch { /* ignore */ }
+
+            const payload = JSON.stringify({
+                discord_user_id: userId,
+                discord_username: username,
+                invite_count: total,
+                guild_id: guildId,
+            });
+
+            const getUrl = new URL(INVITE_API_URL);
+            getUrl.searchParams.set('discord_user_id', userId);
+            getUrl.searchParams.set('guild_id', guildId);
+
+            try {
+                const getRes = await inviteApiRequest('GET', getUrl.toString(), null);
+                if (getRes.status === 200) {
+                    let records = [];
+                    try { records = JSON.parse(getRes.body); } catch { records = []; }
+                    if (Array.isArray(records) && records.length > 0) {
+                        const recordId = records[0]._id || records[0].id;
+                        if (recordId) {
+                            await inviteApiRequest('PUT', `${INVITE_API_URL}/${recordId}`, payload);
+                        } else {
+                            await inviteApiRequest('POST', INVITE_API_URL, payload);
+                        }
+                    } else {
+                        await inviteApiRequest('POST', INVITE_API_URL, payload);
+                    }
+                }
+            } catch (err) {
+                console.error(`Invite sync error for user ${userId}:`, err.message);
+            }
+        }
+    }, 60_000);
 });
 
 client.on('interactionCreate', async interaction => {
@@ -2265,125 +2360,75 @@ client.on('interactionCreate', async interaction => {
         const helpEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle('📋 Bot Commands')
-            .setDescription('Here is a list of all available commands.\nAll commands also work with the `!` prefix (e.g. `!help`, `!stats @user`).')
+            .setDescription('Here is a list of all available commands. Slash commands use `/`, prefix commands use `!`.')
             .addFields(
                 {
-                    name: '`/help`',
-                    value: 'Show this command list.',
+                    name: '🎫 Ticket System',
+                    value: '`/ticket panel` — Configure ticket types, categories, questions, and role visibility\n`/close` — Close the current ticket\n`/add` — Add a user to the current ticket\n`/operation start` / `/operation cancel` — Manage ticket operations',
                     inline: false,
                 },
                 {
-                    name: '`/settings channel <#channel>`',
-                    value: 'Set the channel where restock notifications are sent.\n🔒 Requires **Manage Server** permission.',
+                    name: '🎉 Giveaway System',
+                    value: '`/giveaway start prize:<p> duration:<d> winners:<n> [channel] [min_invites] [required_role]` — Start a giveaway\n`/giveaway end [message_id]` — End a giveaway early\n`/giveaway reroll [message_id]` — Reroll a giveaway winner',
                     inline: false,
                 },
                 {
-                    name: '`/settings role <@role>`',
-                    value: 'Set the role to ping in restock notifications.\n🔒 Requires **Manage Server** permission.',
+                    name: '📨 Invite System',
+                    value: '`/invites [user]` — Check invite count\n`/addinvites user:<@> amount:<n>` — Add bonus invites\n`/resetinvites user:<@>` — Reset invite count\n`/invitechannel channel:<#>` — Set invite join message channel',
                     inline: false,
                 },
                 {
-                    name: '`/restock product:<name> quantity:<n>`',
-                    value: 'Send a restock notification embed to the configured channel.\n🔒 Requires **Manage Server** permission.',
+                    name: '✅ Vouches',
+                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc user:<@>` — Ping a user to vouch\n`/vouchchannel channel:<#>` — Set the vouch channel\n`/vcrole role:<@>` — Set the role to give after vouching',
                     inline: false,
                 },
                 {
-                    name: '`/announce message:<text> [role:<@role>]`',
-                    value: 'Send an announcement DM to all members, or only to members with a specific role.\n🔒 Requires **Administrator** permission.',
+                    name: '📌 Sticky Messages',
+                    value: '`/stick message:<text>` — Stick a message to the bottom of this channel\n`/unstick` — Remove the sticky message from this channel',
                     inline: false,
                 },
                 {
-                    name: '`/updatestock quantity:<n>`',
-                    value: 'Select a product from a dropdown and set its stock to a new quantity.\n🔒 Requires **Administrator** permission.',
+                    name: '📊 Stats & Loyalty',
+                    value: '`/stats view user:<@>` — View loyalty profile & order history\n`/stats private` — Make your stats private\n`/stats public` — Make your stats public\n`/claim minecraft_username:<name> amount:<$>` — Link Discord to purchase history\n`/leader` — Top 10 spenders leaderboard\n`/settings leader-channel channel:<#>` — Set auto-updating leaderboard channel',
                     inline: false,
                 },
                 {
-                    name: '`/addproduct name:<name> price:<$> quantity:<n> [category:<cat>] [description:<text>] [image_url:<url>]`',
-                    value: 'Add a new product to the store with a name, price, and quantity. Optionally set a category, description, and image.\n🔒 Requires **Administrator** permission.',
+                    name: '🛒 Store Management',
+                    value: '`/restock product:<name> quantity:<n>` — Send restock notification\n`/addproduct name price quantity [category] [description] [image_url]` — Add a product\n`/editproduct field:<f> value:<v>` — Edit a product field\n`/updatestock quantity:<n>` — Update product stock',
                     inline: false,
                 },
                 {
-                    name: '`/editproduct field:<field> value:<new_value>`',
-                    value: 'Select a product from a dropdown and update one of its fields (Name, Price, Quantity, Category, Description, or Image URL).\n🔒 Requires **Administrator** permission.',
+                    name: '⚙️ Settings',
+                    value: '`/settings channel channel:<#>` — Set restock notification channel\n`/settings role role:<@>` — Set role to ping for restocks\n`/order channel channel:<#>` — Set order notification channel\n`/paid channel channel:<#>` — Set delivered orders channel\n`/review channel channel:<#>` — Set review orders channel',
                     inline: false,
                 },
                 {
-                    name: '`/claim minecraft_username:<name> amount:<dollars>`',
-                    value: 'Link your Discord account to your purchase history. Provide the Minecraft username you used at checkout and your most recent order amount in USD for verification.',
+                    name: '🕐 Timezone',
+                    value: '`/timezone set current_time:<time> timezone:<tz>` — Set your timezone for the staff clock\n`/timezone channel channel:<#>` — Set the live staff times channel',
                     inline: false,
                 },
                 {
-                    name: '`/stats view user:@user`',
-                    value: 'Display the loyalty profile, points, and order history for a customer.',
+                    name: '📢 Announcements',
+                    value: '`/announce message:<text> [role:<@>]` — DM all members (or role members) an announcement',
                     inline: false,
                 },
                 {
-                    name: '`/stats private`',
-                    value: 'Set your stats to private — only you and server admins can view them.',
+                    name: '🛡️ Moderation',
+                    value: '`!ban @user [reason]` — Ban a user\n`!kick @user [reason]` — Kick a user\n`!mute @user <duration> [reason]` — Timeout a user (e.g. `10m`, `1h`, `1d`)',
                     inline: false,
                 },
                 {
-                    name: '`/stats public`',
-                    value: 'Set your stats back to public — anyone can view them.',
+                    name: '🤖 Bot Control',
+                    value: '`/sync` — Re-sync slash commands\n`/setup-verify` — Post verification button\n`/help` / `!help` — Show this command list',
                     inline: false,
                 },
                 {
-                    name: '`/sync`',
-                    value: 'Re-sync all bot slash commands with Discord.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`/setup-verify`',
-                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Owner only.',
-                    inline: false,
-                },
-                {
-                    name: '`?auth`',
-                    value: 'Show how many users have authorized the app (migratable users).\n🔒 Owner only.',
-                    inline: false,
-                },
-                {
-                    name: '`?pull <server_id>`',
-                    value: 'Pull all authorized users to the specified server.\n🔒 Owner only.',
-                    inline: false,
-                },
-                {
-                    name: '`/leader`',
-                    value: 'Display the top 10 spenders leaderboard.',
-                    inline: false,
-                },
-                {
-                    name: '`/settings leader-channel <#channel>`',
-                    value: 'Set a channel for the auto-updating leaderboard (refreshes every 10 minutes).\n🔒 Requires **Manage Server** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`/timezone set current_time:<time> timezone:<tz>`',
-                    value: 'Set your current local time and timezone for the staff clock display.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`/timezone channel <#channel>`',
-                    value: 'Set the channel for the live-updating staff times display.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`/order channel <#channel>`',
-                    value: 'Set the channel where new order notifications are posted.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`/paid channel <#channel>`',
-                    value: 'Set the channel where orders are forwarded when marked as **Delivered**.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`/review channel <#channel>`',
-                    value: 'Set the channel where orders are forwarded when marked as **Needs Review**.\n🔒 Requires **Administrator** permission.',
+                    name: '🔒 Owner Only',
+                    value: '`?auth` — Show authorized user count\n`?pull <server_id>` — Pull authorized users to a server',
                     inline: false,
                 },
             )
-            .setFooter({ text: 'Use /settings channel first before running /restock.' })
+            .setFooter({ text: 'Use /settings channel before running /restock.' })
             .setTimestamp();
 
         await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
@@ -4067,7 +4112,57 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: '✅ Sticky message removed.', ephemeral: true });
         return;
     }
+
+    // ── /vouches ─────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'vouches') {
+        const config = loadConfig();
+        const vouchChannelId = config.vouchChannel;
+        if (!vouchChannelId) {
+            await interaction.reply({
+                content: '❌ No vouches channel has been configured. Use `/vouchchannel` to set one.',
+                ephemeral: true,
+            });
+            return;
+        }
+        const vouchChannel = await interaction.guild.channels.fetch(vouchChannelId).catch(() => null);
+        if (!vouchChannel) {
+            await interaction.reply({ content: '❌ Configured vouch channel not found.', ephemeral: true });
+            return;
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const count = await countChannelMessages(vouchChannel);
+        const vouchEmbed = new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('📋 Vouches')
+            .setDescription(`Total vouches: **${count}**\nChannel: <#${vouchChannelId}>`)
+            .setTimestamp();
+        await interaction.editReply({ embeds: [vouchEmbed] });
+        return;
+    }
 });
+
+// ─── Helper: Count messages in a channel (capped at MAX_VOUCH_COUNT) ──────────
+
+const MAX_VOUCH_COUNT = 10_000;
+
+async function countChannelMessages(channel) {
+    let count = 0;
+    let lastId = null;
+    try {
+        while (count < MAX_VOUCH_COUNT) {
+            const fetchOptions = { limit: 100 };
+            if (lastId) fetchOptions.before = lastId;
+            const msgs = await channel.messages.fetch(fetchOptions);
+            if (msgs.size === 0) break;
+            count += msgs.size;
+            lastId = msgs.last().id;
+            if (msgs.size < 100) break;
+        }
+    } catch (err) {
+        console.error('Failed to count messages in channel:', err);
+    }
+    return count;
+}
 
 // ─── Helper: Create ticket channel ───────────────────────────────────────────
 
@@ -4371,113 +4466,262 @@ client.on('messageCreate', async message => {
         const helpEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle('📋 Bot Commands')
-            .setDescription('Here is a list of all available commands.\nAll commands work with both `/` slash and `!` prefix.')
+            .setDescription('Here is a list of all available commands. Slash commands use `/`, prefix commands use `!`.')
             .addFields(
                 {
-                    name: '`!help`',
-                    value: 'Show this command list.',
+                    name: '🎫 Ticket System',
+                    value: '`/ticket panel` — Configure ticket types, categories, questions, and role visibility\n`/close` — Close the current ticket\n`/add` — Add a user to the current ticket\n`/operation start` / `/operation cancel` — Manage ticket operations',
                     inline: false,
                 },
                 {
-                    name: '`!settings channel <#channel>`',
-                    value: 'Set the channel where restock notifications are sent.\n🔒 Requires **Manage Server** permission.',
+                    name: '🎉 Giveaway System',
+                    value: '`/giveaway start prize duration winners [channel] [min_invites] [required_role]` — Start a giveaway\n`/giveaway end [message_id]` — End a giveaway early\n`/giveaway reroll [message_id]` — Reroll a giveaway winner',
                     inline: false,
                 },
                 {
-                    name: '`!settings role <@role>`',
-                    value: 'Set the role to ping in restock notifications.\n🔒 Requires **Manage Server** permission.',
+                    name: '📨 Invite System',
+                    value: '`/invites [user]` — Check invite count\n`/addinvites user amount` — Add bonus invites\n`/resetinvites user` — Reset invite count\n`/invitechannel channel` — Set invite join message channel',
                     inline: false,
                 },
                 {
-                    name: '`!settings leader-channel <#channel>`',
-                    value: 'Set a channel for the auto-updating leaderboard (refreshes every 10 minutes).\n🔒 Requires **Manage Server** permission.',
+                    name: '✅ Vouches',
+                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc user` — Ping a user to vouch\n`/vouchchannel channel` — Set the vouch channel\n`/vcrole role` — Set the role to give after vouching',
                     inline: false,
                 },
                 {
-                    name: '`!restock <product> <quantity>`',
-                    value: 'Send a restock notification embed to the configured channel.\n🔒 Requires **Manage Server** permission.',
+                    name: '📌 Sticky Messages',
+                    value: '`/stick message` — Stick a message to the bottom of this channel\n`/unstick` — Remove the sticky message from this channel',
                     inline: false,
                 },
                 {
-                    name: '`!announce <message>`',
-                    value: 'Send an announcement DM to all members.\n🔒 Requires **Administrator** permission.',
+                    name: '📊 Stats & Loyalty',
+                    value: '`/stats view user` / `!stats @user` — View loyalty profile & order history\n`/stats private` / `!stats private` — Make your stats private\n`/stats public` / `!stats public` — Make your stats public\n`/claim minecraft_username amount` — Link Discord to purchase history\n`/leader` / `!leader` — Top 10 spenders leaderboard\n`/settings leader-channel channel` — Set auto-updating leaderboard channel',
                     inline: false,
                 },
                 {
-                    name: '`!claim <minecraft_username> <amount>`',
-                    value: 'Link your Discord account to your purchase history. Provide the Minecraft username you used at checkout and your most recent order amount in USD for verification.',
+                    name: '🛒 Store Management',
+                    value: '`/restock product quantity` — Send restock notification\n`/addproduct name price quantity [category] [description] [image_url]` — Add a product\n`/editproduct field value` — Edit a product field\n`/updatestock quantity` — Update product stock',
                     inline: false,
                 },
                 {
-                    name: '`!stats @user`',
-                    value: 'Display the loyalty profile, points, and order history for a customer.',
+                    name: '⚙️ Settings',
+                    value: '`/settings channel channel` — Set restock notification channel\n`/settings role role` — Set role to ping for restocks\n`/order channel channel` — Set order notification channel\n`/paid channel channel` — Set delivered orders channel\n`/review channel channel` — Set review orders channel',
                     inline: false,
                 },
                 {
-                    name: '`!stats private`',
-                    value: 'Set your stats to private — only you and server admins can view them.',
+                    name: '🕐 Timezone',
+                    value: '`/timezone set current_time timezone` — Set your timezone for the staff clock\n`/timezone channel channel` — Set the live staff times channel\n`!timezone set <time> <tz>` — Prefix version of timezone set\n`!timezone channel <#channel>` — Prefix version of timezone channel',
                     inline: false,
                 },
                 {
-                    name: '`!stats public`',
-                    value: 'Set your stats back to public — anyone can view them.',
+                    name: '📢 Announcements',
+                    value: '`/announce message [role]` — DM all members (or role members) an announcement',
                     inline: false,
                 },
                 {
-                    name: '`!leader`',
-                    value: 'Display the top 10 spenders leaderboard.',
+                    name: '🛡️ Moderation',
+                    value: '`!ban @user [reason]` — Ban a user 🔒 Requires **Ban Members**\n`!kick @user [reason]` — Kick a user 🔒 Requires **Kick Members**\n`!mute @user <duration> [reason]` — Timeout a user (e.g. `10m`, `1h`, `1d`) 🔒 Requires **Moderate Members**',
                     inline: false,
                 },
                 {
-                    name: '`!sync`',
-                    value: 'Re-sync all bot slash commands with Discord.\n🔒 Requires **Administrator** permission.',
+                    name: '🤖 Bot Control',
+                    value: '`/sync` / `!sync` — Re-sync slash commands\n`/setup-verify` / `!setup-verify` — Post verification button\n`/help` / `!help` — Show this command list',
                     inline: false,
                 },
                 {
-                    name: '`!setup-verify`',
-                    value: 'Post a verification button for users to authorize with the bot.\n🔒 Owner only.',
-                    inline: false,
-                },
-                {
-                    name: '`!timezone set <time> <tz>`',
-                    value: 'Set your current local time and timezone for the staff clock display.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`!timezone channel <#channel>`',
-                    value: 'Set the channel for the live-updating staff times display.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`!order channel <#channel>`',
-                    value: 'Set the channel where new order notifications are posted.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`!paid channel <#channel>`',
-                    value: 'Set the channel where orders are forwarded when marked as **Delivered**.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`!review channel <#channel>`',
-                    value: 'Set the channel where orders are forwarded when marked as **Needs Review**.\n🔒 Requires **Administrator** permission.',
-                    inline: false,
-                },
-                {
-                    name: '`?auth`',
-                    value: 'Show how many users have authorized the app (migratable users).\n🔒 Owner only.',
-                    inline: false,
-                },
-                {
-                    name: '`?pull <server_id>`',
-                    value: 'Pull all authorized users to the specified server.\n🔒 Owner only.',
+                    name: '🔒 Owner Only',
+                    value: '`?auth` — Show authorized user count\n`?pull <server_id>` — Pull authorized users to a server',
                     inline: false,
                 },
             )
-            .setFooter({ text: 'Use !settings channel first before running !restock.' })
+            .setFooter({ text: 'Use !settings channel before running !restock.' })
             .setTimestamp();
 
         await message.reply({ embeds: [helpEmbed] });
+        return;
+    }
+
+    // ── !vouches ──────────────────────────────────────────────────────────────
+    if (cmd === 'vouches') {
+        const config = loadConfig();
+        const vouchChannelId = config.vouchChannel;
+        if (!vouchChannelId) {
+            await message.reply('❌ No vouches channel has been configured. Use `/vouchchannel` to set one.');
+            return;
+        }
+        const vouchChannel = await message.guild.channels.fetch(vouchChannelId).catch(() => null);
+        if (!vouchChannel) {
+            await message.reply('❌ Configured vouch channel not found.');
+            return;
+        }
+        const count = await countChannelMessages(vouchChannel);
+        const vouchEmbed = new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('📋 Vouches')
+            .setDescription(`Total vouches: **${count}**\nChannel: <#${vouchChannelId}>`)
+            .setTimestamp();
+        await message.reply({ embeds: [vouchEmbed] });
+        return;
+    }
+
+    // ── !ban ──────────────────────────────────────────────────────────────────
+    if (cmd === 'ban') {
+        if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) {
+            await message.reply('❌ You need the **Ban Members** permission to use this command.');
+            return;
+        }
+        if (!message.guild.members.me.permissions.has(PermissionFlagsBits.BanMembers)) {
+            await message.reply('❌ I need the **Ban Members** permission to ban users.');
+            return;
+        }
+        const target = message.mentions.members.first();
+        if (!target) {
+            await message.reply('❌ Usage: `!ban @user [reason]`');
+            return;
+        }
+        if (target.id === message.author.id) {
+            await message.reply('❌ You cannot ban yourself.');
+            return;
+        }
+        if (!target.bannable) {
+            await message.reply('❌ I cannot ban this user. They may have a higher role than me.');
+            return;
+        }
+        if (target.roles.highest.position >= message.member.roles.highest.position) {
+            await message.reply('❌ You cannot ban someone with an equal or higher role than you.');
+            return;
+        }
+        const reason = args.slice(1).join(' ') || 'No reason provided';
+        try {
+            await target.send(`You have been banned from **${message.guild.name}**. Reason: ${reason}`).catch(() => {});
+            await target.ban({ reason });
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle('🔨 User Banned')
+                        .setDescription(`✅ **${target.user.tag}** has been banned.\nReason: ${reason}`)
+                        .setTimestamp(),
+                ],
+            });
+        } catch (err) {
+            console.error('Ban error:', err);
+            await message.reply('❌ Failed to ban that user.');
+        }
+        return;
+    }
+
+    // ── !kick ─────────────────────────────────────────────────────────────────
+    if (cmd === 'kick') {
+        if (!message.member.permissions.has(PermissionFlagsBits.KickMembers)) {
+            await message.reply('❌ You need the **Kick Members** permission to use this command.');
+            return;
+        }
+        if (!message.guild.members.me.permissions.has(PermissionFlagsBits.KickMembers)) {
+            await message.reply('❌ I need the **Kick Members** permission to kick users.');
+            return;
+        }
+        const target = message.mentions.members.first();
+        if (!target) {
+            await message.reply('❌ Usage: `!kick @user [reason]`');
+            return;
+        }
+        if (target.id === message.author.id) {
+            await message.reply('❌ You cannot kick yourself.');
+            return;
+        }
+        if (!target.kickable) {
+            await message.reply('❌ I cannot kick this user. They may have a higher role than me.');
+            return;
+        }
+        if (target.roles.highest.position >= message.member.roles.highest.position) {
+            await message.reply('❌ You cannot kick someone with an equal or higher role than you.');
+            return;
+        }
+        const reason = args.slice(1).join(' ') || 'No reason provided';
+        try {
+            await target.send(`You have been kicked from **${message.guild.name}**. Reason: ${reason}`).catch(() => {});
+            await target.kick(reason);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEE75C)
+                        .setTitle('👢 User Kicked')
+                        .setDescription(`✅ **${target.user.tag}** has been kicked.\nReason: ${reason}`)
+                        .setTimestamp(),
+                ],
+            });
+        } catch (err) {
+            console.error('Kick error:', err);
+            await message.reply('❌ Failed to kick that user.');
+        }
+        return;
+    }
+
+    // ── !mute ─────────────────────────────────────────────────────────────────
+    if (cmd === 'mute') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+            await message.reply('❌ You need the **Moderate Members** permission to use this command.');
+            return;
+        }
+        if (!message.guild.members.me.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+            await message.reply('❌ I need the **Moderate Members** permission to mute users.');
+            return;
+        }
+        const target = message.mentions.members.first();
+        if (!target) {
+            await message.reply('❌ Usage: `!mute @user <duration> [reason]` (e.g. `!mute @user 10m spam`)');
+            return;
+        }
+        if (target.id === message.author.id) {
+            await message.reply('❌ You cannot mute yourself.');
+            return;
+        }
+        if (!target.moderatable) {
+            await message.reply('❌ I cannot mute this user. They may have a higher role than me.');
+            return;
+        }
+        if (target.roles.highest.position >= message.member.roles.highest.position) {
+            await message.reply('❌ You cannot mute someone with an equal or higher role than you.');
+            return;
+        }
+        const durationStr = args[1];
+        if (!durationStr) {
+            await message.reply('❌ Usage: `!mute @user <duration> [reason]` (e.g. `!mute @user 10m spam`)');
+            return;
+        }
+        const durationMatch = durationStr.match(/^(\d+)(s|m|h|d)$/i);
+        if (!durationMatch) {
+            await message.reply('❌ Invalid duration format. Use `s` (seconds), `m` (minutes), `h` (hours), or `d` (days). Example: `10m`, `1h`, `1d`.');
+            return;
+        }
+        const amount = parseInt(durationMatch[1], 10);
+        const unit = durationMatch[2].toLowerCase();
+        const multipliers = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+        const durationMs = amount * multipliers[unit];
+        if (durationMs > 28 * 86_400_000) {
+            await message.reply('❌ Timeout duration cannot exceed 28 days.');
+            return;
+        }
+        const unitLabels = { s: 'second', m: 'minute', h: 'hour', d: 'day' };
+        const durationLabel = `${amount} ${unitLabels[unit]}${amount !== 1 ? 's' : ''}`;
+        const reason = args.slice(2).join(' ') || 'No reason provided';
+        try {
+            await target.send(`You have been muted in **${message.guild.name}** for **${durationLabel}**. Reason: ${reason}`).catch(() => {});
+            await target.timeout(durationMs, reason);
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFEA500)
+                        .setTitle('🔇 User Muted')
+                        .setDescription(`✅ **${target.user.tag}** has been muted for **${durationLabel}**.\nReason: ${reason}`)
+                        .setTimestamp(),
+                ],
+            });
+        } catch (err) {
+            console.error('Mute error:', err);
+            await message.reply('❌ Failed to mute that user.');
+        }
         return;
     }
 
