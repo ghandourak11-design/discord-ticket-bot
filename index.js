@@ -396,6 +396,17 @@ const commands = [
             sub.setName('panel').setDescription('Open the ticket system configuration panel'),
         ),
 
+    new SlashCommandBuilder()
+        .setName('close')
+        .setDescription('Close the current ticket')
+        .addStringOption(opt =>
+            opt.setName('reason').setDescription('Reason for closing the ticket').setRequired(false),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('secretclose')
+        .setDescription('Silently close the current ticket without notifying the user'),
+
     // ── Invite tracking commands ───────────────────────────────────────────────
     new SlashCommandBuilder()
         .setName('invites')
@@ -431,12 +442,16 @@ const commands = [
             opt.setName('channel').setDescription('Channel for invite notifications').setRequired(true),
         ),
 
+    new SlashCommandBuilder()
+        .setName('leaderboard')
+        .setDescription('Show the top 10 inviters in this server'),
+
     // ── Vouch commands ─────────────────────────────────────────────────────────
     new SlashCommandBuilder()
         .setName('vc')
-        .setDescription('Ping a user to head over to the vouch channel')
-        .addUserOption(opt =>
-            opt.setName('user').setDescription('User to ask for a vouch').setRequired(true),
+        .setDescription('Send a vouch message to the ticket creator and assign the vc role (ticket channels only)')
+        .addIntegerOption(opt =>
+            opt.setName('timer').setDescription('Minutes before the ticket auto-closes (optional)').setRequired(false).setMinValue(1),
         ),
 
     new SlashCommandBuilder()
@@ -2422,7 +2437,7 @@ client.on('interactionCreate', async interaction => {
             .addFields(
                 {
                     name: '🎫 Ticket System',
-                    value: '`/ticket panel` — Configure ticket types, categories, questions, and role visibility\n`/close` — Close the current ticket\n`/add` — Add a user to the current ticket\n`/operation start` / `/operation cancel` — Manage ticket operations',
+                    value: '`/ticket panel` — Configure ticket types, categories, questions, and role visibility\n`/close [reason]` — Close the current ticket\n`/secretclose` — Silently close the current ticket\n`/add` — Add a user to the current ticket\n`/operation start` / `/operation cancel` — Manage ticket operations',
                     inline: false,
                 },
                 {
@@ -2432,12 +2447,12 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '📨 Invite System',
-                    value: '`/invites [user]` — Check invite count\n`/addinvites user:<@> amount:<n>` — Add bonus invites\n`/resetinvites user:<@>` — Reset invite count\n`/invitechannel channel:<#>` — Set invite join message channel',
+                    value: '`/invites [user]` — Check invite count\n`/addinvites user:<@> amount:<n>` — Add bonus invites\n`/resetinvites user:<@>` — Reset invite count\n`/invitechannel channel:<#>` — Set invite join message channel\n`/leaderboard` — Show top 10 inviters',
                     inline: false,
                 },
                 {
                     name: '✅ Vouches',
-                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc user:<@>` — Ping a user to vouch\n`/vouchchannel channel:<#>` — Set the vouch channel\n`/vcrole role:<@>` — Set the role to give after vouching',
+                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc [timer]` — Send vouch message to ticket creator & assign vc role\n`/vouchchannel channel:<#>` — Set the vouch channel\n`/vcrole role:<@>` — Set the role to give after vouching',
                     inline: false,
                 },
                 {
@@ -3780,8 +3795,7 @@ client.on('interactionCreate', async interaction => {
         const panelEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle(tConf.panelTitle || '🎫 Support Tickets')
-            .setDescription(tConf.panelDescription || 'Click a button below to open a ticket.')
-            .addFields(types.map(t => ({ name: t.name, value: t.questions.length > 0 ? `${t.questions.length} question(s)` : 'No questions', inline: true })));
+            .setDescription(tConf.panelDescription || 'Click a button below to open a ticket.');
 
         const rows = [];
         for (let i = 0; i < types.length; i += 5) {
@@ -4126,9 +4140,106 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // ── /close ────────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'close') {
+        const openTickets = getOpenTickets(interaction.guild.id);
+        const ticket = openTickets[interaction.channel.id];
+        if (!ticket) {
+            await interaction.reply({ content: '❌ This channel is not a ticket.', ephemeral: true });
+            return;
+        }
+        const reason = interaction.options.getString('reason') || 'No reason provided.';
+
+        // DM the ticket creator
+        try {
+            const creator = await client.users.fetch(ticket.userId);
+            const dmEmbed = new EmbedBuilder()
+                .setColor(0xED4245)
+                .setTitle('🎫 Your ticket has been closed')
+                .addFields(
+                    { name: '🔒 Reason', value: reason },
+                    { name: '📋 Channel', value: `#${interaction.channel.name}` },
+                    { name: '👤 Closed by', value: interaction.user.tag },
+                )
+                .setTimestamp();
+            await creator.send({ embeds: [dmEmbed] });
+        } catch { /* DMs disabled */ }
+
+        delete openTickets[interaction.channel.id];
+        saveOpenTickets(interaction.guild.id, openTickets);
+
+        await interaction.reply({ content: '🔒 Closing ticket...' });
+        try {
+            await interaction.channel.delete();
+        } catch (err) {
+            console.error('Failed to delete ticket channel:', err);
+        }
+        return;
+    }
+
+    // ── /secretclose ─────────────────────────────────────────────────────────
+    if (interaction.commandName === 'secretclose') {
+        const openTickets = getOpenTickets(interaction.guild.id);
+        const ticket = openTickets[interaction.channel.id];
+        if (!ticket) {
+            await interaction.reply({ content: '❌ This channel is not a ticket.', ephemeral: true });
+            return;
+        }
+
+        delete openTickets[interaction.channel.id];
+        saveOpenTickets(interaction.guild.id, openTickets);
+
+        await interaction.reply({ content: '🔒 Closing ticket...' });
+        try {
+            await interaction.channel.delete();
+        } catch (err) {
+            console.error('Failed to delete ticket channel:', err);
+        }
+        return;
+    }
+
+    // ── /leaderboard ─────────────────────────────────────────────────────────
+    if (interaction.commandName === 'leaderboard') {
+        const invData = loadInvites();
+        const guildData = invData[interaction.guild.id] || {};
+        const users = guildData.users || {};
+
+        const sorted = Object.entries(users)
+            .map(([id, inv]) => ({
+                id,
+                total: (inv.real || 0) + (inv.bonus || 0) - (inv.left || 0),
+            }))
+            .sort((a, b) => b.total - a.total)
+            .slice(0, 10);
+
+        if (sorted.length === 0) {
+            await interaction.reply({ content: '❌ No invite data found for this server.', ephemeral: true });
+            return;
+        }
+
+        const description = sorted
+            .map((entry, i) => `**${i + 1}.** <@${entry.id}> — **${entry.total}** invite${entry.total !== 1 ? 's' : ''}`)
+            .join('\n');
+
+        const lbEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📨 Top 10 Inviters')
+            .setDescription(description)
+            .setTimestamp();
+
+        await interaction.reply({ embeds: [lbEmbed] });
+        return;
+    }
+
     // ── /vc ──────────────────────────────────────────────────────────────────
     if (interaction.commandName === 'vc') {
-        const targetUser = interaction.options.getUser('user');
+        const openTickets = getOpenTickets(interaction.guild.id);
+        const ticket = openTickets[interaction.channel.id];
+        if (!ticket) {
+            await interaction.reply({ content: '❌ This command can only be used inside a ticket channel.', ephemeral: true });
+            return;
+        }
+
         const config = loadConfig();
         const vouchChannelId = config.vouchChannel;
         if (!vouchChannelId) {
@@ -4136,20 +4247,30 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
-        // This should be used inside a ticket channel
-        const openTickets = getOpenTickets(interaction.guild.id);
-        const ticket = openTickets[interaction.channel.id];
+        const creatorId = ticket.userId;
+        const guildId = interaction.guild.id;
+        const channelId = interaction.channel.id;
 
+        // Immediately assign vc role to ticket creator
+        const vcRoleId = config.vcRole;
+        if (vcRoleId) {
+            try {
+                const member = await interaction.guild.members.fetch(creatorId);
+                await member.roles.add(vcRoleId);
+            } catch (err) {
+                console.error('Failed to assign vc role:', err);
+            }
+        }
+
+        // Send vouch message pinging the ticket creator
         await interaction.reply({
-            content: `${targetUser} please head on over to <#${vouchChannelId}> and vouch us! 🎉`,
+            content: `<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`,
         });
 
-        if (ticket) {
-            // Start 10-minute timer to auto-close ticket and assign vc role
-            const VC_TIMER_MS = 10 * 60 * 1000;
-            const creatorId = ticket.userId;
-            const guildId = interaction.guild.id;
-            const channelId = interaction.channel.id;
+        // Optional timer to auto-close the ticket
+        const timerMinutes = interaction.options.getInteger('timer');
+        if (timerMinutes) {
+            const timerMs = timerMinutes * 60 * 1000;
 
             if (vcTimers.has(channelId)) {
                 clearTimeout(vcTimers.get(channelId).timer);
@@ -4158,15 +4279,6 @@ client.on('interactionCreate', async interaction => {
             const timer = setTimeout(async () => {
                 vcTimers.delete(channelId);
                 try {
-                    // Assign vc role to ticket creator
-                    const freshConfig = loadConfig();
-                    const vcRoleId = freshConfig.vcRole;
-                    if (vcRoleId) {
-                        const guild = await client.guilds.fetch(guildId);
-                        const member = await guild.members.fetch(creatorId);
-                        await member.roles.add(vcRoleId);
-                    }
-                    // Close the ticket
                     const ch = await client.channels.fetch(channelId);
                     if (ch) {
                         const freshTickets = getOpenTickets(guildId);
@@ -4177,7 +4289,7 @@ client.on('interactionCreate', async interaction => {
                 } catch (err) {
                     console.error('vc timer error:', err);
                 }
-            }, VC_TIMER_MS);
+            }, timerMs);
 
             vcTimers.set(channelId, { creatorId, guildId, timer });
         }
@@ -4653,7 +4765,7 @@ client.on('messageCreate', async message => {
             .addFields(
                 {
                     name: '🎫 Ticket System',
-                    value: '`/ticket panel` — Configure ticket types, categories, questions, and role visibility\n`/close` — Close the current ticket\n`/add` — Add a user to the current ticket\n`/operation start` / `/operation cancel` — Manage ticket operations',
+                    value: '`/ticket panel` — Configure ticket types, categories, questions, and role visibility\n`/close [reason]` — Close the current ticket\n`/secretclose` — Silently close the current ticket\n`/add` — Add a user to the current ticket\n`/operation start` / `/operation cancel` — Manage ticket operations',
                     inline: false,
                 },
                 {
@@ -4663,12 +4775,12 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '📨 Invite System',
-                    value: '`/invites [user]` — Check invite count\n`/addinvites user amount` — Add bonus invites\n`/resetinvites user` — Reset invite count\n`/invitechannel channel` — Set invite join message channel',
+                    value: '`/invites [user]` — Check invite count\n`/addinvites user amount` — Add bonus invites\n`/resetinvites user` — Reset invite count\n`/invitechannel channel` — Set invite join message channel\n`/leaderboard` — Show top 10 inviters',
                     inline: false,
                 },
                 {
                     name: '✅ Vouches',
-                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc user` — Ping a user to vouch\n`/vouchchannel channel` — Set the vouch channel\n`/vcrole role` — Set the role to give after vouching',
+                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc [timer]` — Send vouch message to ticket creator & assign vc role\n`/vouchchannel channel` — Set the vouch channel\n`/vcrole role` — Set the role to give after vouching',
                     inline: false,
                 },
                 {
