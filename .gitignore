@@ -1,2 +1,7 @@
 node_modules/
 .env
+# Runtime-generated data files (created at startup, modified at runtime)
+invites_data.json
+invites_auto_backup.json
+sos_data.json
+bid_data.json
