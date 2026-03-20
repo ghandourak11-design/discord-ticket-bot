@@ -475,6 +475,36 @@ const commands = [
         .addUserOption(opt =>
             opt.setName('user').setDescription('User to check vouches for (optional)').setRequired(false),
         ),
+
+    // ── Embed builder command ──────────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('embed')
+        .setDescription('Send a custom embed message to the current channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+        .addStringOption(opt =>
+            opt.setName('title').setDescription('Embed title').setRequired(true),
+        )
+        .addStringOption(opt =>
+            opt.setName('description').setDescription('Embed description').setRequired(false),
+        )
+        .addStringOption(opt =>
+            opt.setName('color').setDescription('Hex color code (e.g. #FF0000) or name (red, green, blue, yellow)').setRequired(false),
+        )
+        .addStringOption(opt =>
+            opt.setName('footer').setDescription('Footer text').setRequired(false),
+        )
+        .addStringOption(opt =>
+            opt.setName('image').setDescription('Image URL').setRequired(false),
+        )
+        .addStringOption(opt =>
+            opt.setName('thumbnail').setDescription('Thumbnail URL').setRequired(false),
+        )
+        .addStringOption(opt =>
+            opt.setName('author').setDescription('Author name').setRequired(false),
+        )
+        .addStringOption(opt =>
+            opt.setName('url').setDescription('Title URL').setRequired(false),
+        ),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -1738,6 +1768,20 @@ function genId() {
     return Math.random().toString(36).slice(2, 8);
 }
 
+const BUTTON_STYLE_MAP = {
+    'Primary': ButtonStyle.Primary,
+    'Secondary': ButtonStyle.Secondary,
+    'Success': ButtonStyle.Success,
+    'Danger': ButtonStyle.Danger,
+};
+
+const BUTTON_STYLE_LABELS = {
+    'Primary': '🔵 Blurple',
+    'Secondary': '⚪ Grey',
+    'Success': '🟢 Green',
+    'Danger': '🔴 Red',
+};
+
 function getTicketConfig(guildId) {
     const config = loadConfig();
     if (!config.ticketConfig) config.ticketConfig = {};
@@ -1775,13 +1819,19 @@ function buildTicketPanelSettingsEmbed(guildId) {
     const tConf = getTicketConfig(guildId);
     const types = tConf.types || [];
     const lines = types.length > 0
-        ? types.map((t, i) => `**${i + 1}.** ${t.name} — ${t.questions.length} question(s), ${t.viewableRoles.length} role(s)`)
+        ? types.map((t, i) => `**${i + 1}.** ${t.name} — ${t.questions.length} question(s), ${t.viewableRoles.length} role(s), ${BUTTON_STYLE_LABELS[t.buttonStyle] || BUTTON_STYLE_LABELS['Primary']}`)
         : ['No ticket types configured yet. Add one below!'];
+    const panelTitle = tConf.panelTitle || '🎫 Support Tickets';
+    const panelDesc = tConf.panelDescription || 'Click a button below to open a ticket.';
     return new EmbedBuilder()
         .setColor(0x5865F2)
         .setTitle('🎫 Ticket Panel Configuration')
         .setDescription('Manage your ticket types below. Configure each type\'s name, category, questions, and viewable roles.')
-        .addFields({ name: 'Current Ticket Types', value: lines.join('\n') })
+        .addFields(
+            { name: 'Current Ticket Types', value: lines.join('\n') },
+            { name: '📝 Panel Title', value: panelTitle, inline: true },
+            { name: '📝 Panel Description', value: panelDesc, inline: true },
+        )
         .setFooter({ text: 'Select a type to configure it, or add a new one.' });
 }
 
@@ -1792,12 +1842,14 @@ function buildTypeConfigEmbed(type) {
     const qStr = type.questions.length > 0
         ? type.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')
         : 'No questions set.';
+    const colorLabel = BUTTON_STYLE_LABELS[type.buttonStyle] || BUTTON_STYLE_LABELS['Primary'];
     return new EmbedBuilder()
         .setColor(0x5865F2)
         .setTitle(`⚙️ Configuring: ${type.name}`)
         .addFields(
             { name: '🗂️ Category', value: type.categoryId ? `<#${type.categoryId}>` : 'Not set', inline: true },
             { name: '👁️ Viewable Roles', value: roleStr, inline: true },
+            { name: '🎨 Button Color', value: colorLabel, inline: true },
             { name: '❓ Questions', value: qStr },
         )
         .setFooter({ text: `Type ID: ${type.id}` });
@@ -1830,9 +1882,14 @@ function buildTicketSettingsComponents(guildId) {
         .setLabel('📋 Post Ticket Panel')
         .setStyle(ButtonStyle.Success);
 
+    const editPanelBtn = new ButtonBuilder()
+        .setCustomId('tp_edit_panel')
+        .setLabel('✏️ Edit Panel Text')
+        .setStyle(ButtonStyle.Primary);
+
     return [
         new ActionRowBuilder().addComponents(select),
-        new ActionRowBuilder().addComponents(postBtn),
+        new ActionRowBuilder().addComponents(postBtn, editPanelBtn),
     ];
 }
 
@@ -1841,6 +1898,7 @@ function buildTypeConfigComponents(typeId) {
         new ButtonBuilder().setCustomId(`tp_cfg_name:${typeId}`).setLabel('✏️ Edit Name').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(`tp_cfg_category:${typeId}`).setLabel('🗂️ Set Category').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(`tp_cfg_questions:${typeId}`).setLabel('❓ Set Questions').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`tp_cfg_color:${typeId}`).setLabel('🎨 Button Color').setStyle(ButtonStyle.Primary),
     );
     const row2 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`tp_cfg_roles:${typeId}`).setLabel('👁️ Set Viewable Roles').setStyle(ButtonStyle.Secondary),
@@ -2414,7 +2472,12 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '🛡️ Moderation',
-                    value: '`!ban @user [reason]` — Ban a user\n`!kick @user [reason]` — Kick a user\n`!mute @user <duration> [reason]` — Timeout a user (e.g. `10m`, `1h`, `1d`)',
+                    value: '`!ban @user [reason]` — Ban a user\n`!kick @user [reason]` — Kick a user\n`!mute @user <duration> [reason]` — Timeout a user (e.g. `10m`, `1h`, `1d`)\n`!purge <1-100>` — Bulk delete messages',
+                    inline: false,
+                },
+                {
+                    name: '📨 Embed Builder',
+                    value: '`/embed title [description] [color] [footer] [image] [thumbnail] [author] [url]` — Send a custom embed',
                     inline: false,
                 },
                 {
@@ -3630,6 +3693,70 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // ── Button: Ticket config — button color ─────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_color:')) {
+        const typeId = interaction.customId.slice('tp_cfg_color:'.length);
+        const colorSelect = new StringSelectMenuBuilder()
+            .setCustomId(`tp_color_select:${typeId}`)
+            .setPlaceholder('Choose a button color…')
+            .addOptions(
+                Object.entries(BUTTON_STYLE_LABELS).map(([key, label]) =>
+                    new StringSelectMenuOptionBuilder().setLabel(label).setValue(key),
+                ),
+            );
+        await interaction.reply({
+            content: '🎨 Select a button color for this ticket type:',
+            components: [new ActionRowBuilder().addComponents(colorSelect)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── Select: Ticket button color ──────────────────────────────────────────
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('tp_color_select:')) {
+        const typeId = interaction.customId.slice('tp_color_select:'.length);
+        const selected = interaction.values[0];
+        if (!BUTTON_STYLE_MAP[selected]) {
+            await interaction.reply({ content: '❌ Invalid color selection.', ephemeral: true });
+            return;
+        }
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        type.buttonStyle = selected;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ content: null, embeds: [embed], components });
+        return;
+    }
+
+    // ── Button: Edit panel text ──────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'tp_edit_panel') {
+        const tConf = getTicketConfig(interaction.guild.id);
+        const modal = new ModalBuilder().setCustomId('tp_modal_panel_text').setTitle('Edit Panel Text');
+        const titleInput = new TextInputBuilder()
+            .setCustomId('panel_title')
+            .setLabel('Panel Title')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setMaxLength(256)
+            .setValue(tConf.panelTitle || '🎫 Support Tickets');
+        const descInput = new TextInputBuilder()
+            .setCustomId('panel_description')
+            .setLabel('Panel Description')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(4000)
+            .setValue(tConf.panelDescription || 'Click a button below to open a ticket.');
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(titleInput),
+            new ActionRowBuilder().addComponents(descInput),
+        );
+        await interaction.showModal(modal);
+        return;
+    }
+
     // ── Button: Ticket config — delete type ──────────────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_delete:')) {
         const typeId = interaction.customId.slice('tp_cfg_delete:'.length);
@@ -3652,8 +3779,8 @@ client.on('interactionCreate', async interaction => {
         }
         const panelEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
-            .setTitle('🎫 Support Tickets')
-            .setDescription('Click a button below to open a ticket.')
+            .setTitle(tConf.panelTitle || '🎫 Support Tickets')
+            .setDescription(tConf.panelDescription || 'Click a button below to open a ticket.')
             .addFields(types.map(t => ({ name: t.name, value: t.questions.length > 0 ? `${t.questions.length} question(s)` : 'No questions', inline: true })));
 
         const rows = [];
@@ -3664,7 +3791,7 @@ client.on('interactionCreate', async interaction => {
                     new ButtonBuilder()
                         .setCustomId(`ticket_open:${t.id}`)
                         .setLabel(t.name.slice(0, 80))
-                        .setStyle(ButtonStyle.Primary),
+                        .setStyle(BUTTON_STYLE_MAP[t.buttonStyle] || ButtonStyle.Primary),
                 ),
             );
             rows.push(row);
@@ -3680,7 +3807,7 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isModalSubmit() && interaction.customId === 'tp_modal_new_type') {
         const name = interaction.fields.getTextInputValue('type_name').trim();
         const tConf = getTicketConfig(interaction.guild.id);
-        const newType = { id: genId(), name, categoryId: null, questions: [], viewableRoles: [] };
+        const newType = { id: genId(), name, categoryId: null, questions: [], viewableRoles: [], buttonStyle: 'Primary' };
         tConf.types.push(newType);
         saveTicketConfig(interaction.guild.id, tConf);
 
@@ -3753,6 +3880,20 @@ client.on('interactionCreate', async interaction => {
         saveTicketConfig(interaction.guild.id, tConf);
         const embed = buildTypeConfigEmbed(type);
         const components = buildTypeConfigComponents(typeId);
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
+        return;
+    }
+
+    // ── Modal: Edit panel text ───────────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId === 'tp_modal_panel_text') {
+        const panelTitle = interaction.fields.getTextInputValue('panel_title').trim();
+        const panelDescription = interaction.fields.getTextInputValue('panel_description').trim();
+        const tConf = getTicketConfig(interaction.guild.id);
+        tConf.panelTitle = panelTitle;
+        tConf.panelDescription = panelDescription;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTicketPanelSettingsEmbed(interaction.guild.id);
+        const components = buildTicketSettingsComponents(interaction.guild.id);
         await interaction.reply({ embeds: [embed], components, ephemeral: true });
         return;
     }
@@ -4139,6 +4280,45 @@ client.on('interactionCreate', async interaction => {
         await interaction.editReply({ embeds: [vouchEmbed] });
         return;
     }
+
+    // ── /embed ───────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'embed') {
+        const title = interaction.options.getString('title');
+        const description = interaction.options.getString('description');
+        const colorInput = interaction.options.getString('color');
+        const footer = interaction.options.getString('footer');
+        const image = interaction.options.getString('image');
+        const thumbnail = interaction.options.getString('thumbnail');
+        const author = interaction.options.getString('author');
+        const url = interaction.options.getString('url');
+
+        const colorNames = {
+            red: 0xED4245, green: 0x57F287, blue: 0x5865F2, yellow: 0xFEE75C,
+            orange: 0xE67E22, purple: 0x9B59B6, pink: 0xEB459E, white: 0xFFFFFF,
+            black: 0x23272A, grey: 0x95A5A6, gray: 0x95A5A6, blurple: 0x5865F2,
+        };
+        let embedColor = 0x5865F2;
+        if (colorInput) {
+            const hexMatch = colorInput.replace('#', '').match(/^([0-9A-Fa-f]{6})$/);
+            if (hexMatch) {
+                embedColor = parseInt(hexMatch[1], 16);
+            } else if (colorNames[colorInput.toLowerCase()]) {
+                embedColor = colorNames[colorInput.toLowerCase()];
+            }
+        }
+
+        const embed = new EmbedBuilder().setColor(embedColor).setTitle(title);
+        if (description) embed.setDescription(description);
+        if (footer) embed.setFooter({ text: footer });
+        if (image) embed.setImage(image);
+        if (thumbnail) embed.setThumbnail(thumbnail);
+        if (author) embed.setAuthor({ name: author });
+        if (url) embed.setURL(url);
+
+        await interaction.channel.send({ embeds: [embed] });
+        await interaction.reply({ content: '✅ Embed sent!', ephemeral: true });
+        return;
+    }
 });
 
 // ─── Helper: Count messages in a channel (capped at MAX_VOUCH_COUNT) ──────────
@@ -4520,7 +4700,12 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '🛡️ Moderation',
-                    value: '`!ban @user [reason]` — Ban a user 🔒 Requires **Ban Members**\n`!kick @user [reason]` — Kick a user 🔒 Requires **Kick Members**\n`!mute @user <duration> [reason]` — Timeout a user (e.g. `10m`, `1h`, `1d`) 🔒 Requires **Moderate Members**',
+                    value: '`!ban @user [reason]` — Ban a user 🔒 Requires **Ban Members**\n`!kick @user [reason]` — Kick a user 🔒 Requires **Kick Members**\n`!mute @user <duration> [reason]` — Timeout a user (e.g. `10m`, `1h`, `1d`) 🔒 Requires **Moderate Members**\n`!purge <1-100>` — Bulk delete messages 🔒 Requires **Manage Messages**',
+                    inline: false,
+                },
+                {
+                    name: '📨 Embed Builder',
+                    value: '`/embed title [description] [color] [footer] [image] [thumbnail] [author] [url]` — Send a custom embed',
                     inline: false,
                 },
                 {
@@ -4721,6 +4906,40 @@ client.on('messageCreate', async message => {
         } catch (err) {
             console.error('Mute error:', err);
             await message.reply('❌ Failed to mute that user.');
+        }
+        return;
+    }
+
+    // ── !purge ────────────────────────────────────────────────────────────────
+    if (cmd === 'purge') {
+        if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
+            await message.reply('❌ You need the **Manage Messages** permission to use this command.');
+            return;
+        }
+        if (!message.guild.members.me.permissions.has(PermissionFlagsBits.ManageMessages)) {
+            await message.reply('❌ I need the **Manage Messages** permission to delete messages.');
+            return;
+        }
+        const amount = parseInt(args[0], 10);
+        if (!amount || amount < 1 || amount > 100) {
+            await message.reply('❌ Usage: `!purge <1-100>` — Specify the number of messages to delete (max 100).');
+            return;
+        }
+        try {
+            const deleted = await message.channel.bulkDelete(amount + 1, true);
+            const confirmation = await message.channel.send({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('🗑️ Messages Purged')
+                        .setDescription(`Successfully deleted **${deleted.size - 1}** message(s).`)
+                        .setTimestamp(),
+                ],
+            });
+            setTimeout(() => confirmation.delete().catch(() => {}), 5000);
+        } catch (err) {
+            console.error('Purge error:', err);
+            await message.reply('❌ Failed to delete messages. Messages older than 14 days cannot be bulk deleted.');
         }
         return;
     }
