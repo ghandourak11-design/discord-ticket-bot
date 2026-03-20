@@ -13,6 +13,9 @@ const {
     ButtonStyle,
     StringSelectMenuBuilder,
     StringSelectMenuOptionBuilder,
+    ModalBuilder,
+    TextInputBuilder,
+    TextInputStyle,
     PermissionFlagsBits,
     AuditLogEvent,
     REST,
@@ -338,6 +341,133 @@ const commands = [
                         .setRequired(true),
                 ),
         ),
+
+    // ── Giveaway commands ──────────────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('giveaway')
+        .setDescription('Manage giveaways')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+        .addSubcommand(sub =>
+            sub
+                .setName('start')
+                .setDescription('Start a new giveaway')
+                .addStringOption(opt =>
+                    opt.setName('prize').setDescription('What is the giveaway for?').setRequired(true),
+                )
+                .addStringOption(opt =>
+                    opt.setName('duration').setDescription('Duration (e.g. 1h, 30m, 1d)').setRequired(true),
+                )
+                .addIntegerOption(opt =>
+                    opt.setName('winners').setDescription('Number of winners').setRequired(true).setMinValue(1),
+                )
+                .addChannelOption(opt =>
+                    opt.setName('channel').setDescription('Channel to post the giveaway in').setRequired(false),
+                )
+                .addIntegerOption(opt =>
+                    opt.setName('min_invites').setDescription('Minimum invite count to participate').setRequired(false).setMinValue(0),
+                )
+                .addRoleOption(opt =>
+                    opt.setName('required_role').setDescription('Role required to participate').setRequired(false),
+                ),
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('end')
+                .setDescription('Manually end an active giveaway early')
+                .addStringOption(opt =>
+                    opt.setName('message_id').setDescription('The giveaway message ID to end').setRequired(false),
+                ),
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('reroll')
+                .setDescription('Re-pick winners for a completed giveaway')
+                .addStringOption(opt =>
+                    opt.setName('message_id').setDescription('The giveaway message ID to reroll').setRequired(false),
+                ),
+        ),
+
+    // ── Ticket panel command ───────────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('ticket')
+        .setDescription('Ticket system management')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+        .addSubcommand(sub =>
+            sub.setName('panel').setDescription('Open the ticket system configuration panel'),
+        ),
+
+    // ── Invite tracking commands ───────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('invites')
+        .setDescription('Check invite count for a user')
+        .addUserOption(opt =>
+            opt.setName('user').setDescription('User to check (defaults to yourself)').setRequired(false),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('resetinvites')
+        .setDescription('Reset a user\'s invite count')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addUserOption(opt =>
+            opt.setName('user').setDescription('User to reset').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('addinvites')
+        .setDescription('Add bonus invites to a user\'s count')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addUserOption(opt =>
+            opt.setName('user').setDescription('User to add invites to').setRequired(true),
+        )
+        .addIntegerOption(opt =>
+            opt.setName('amount').setDescription('Amount of invites to add').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('invitechannel')
+        .setDescription('Set the channel for invite join messages')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addChannelOption(opt =>
+            opt.setName('channel').setDescription('Channel for invite notifications').setRequired(true),
+        ),
+
+    // ── Vouch commands ─────────────────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('vc')
+        .setDescription('Ping a user to head over to the vouch channel')
+        .addUserOption(opt =>
+            opt.setName('user').setDescription('User to ask for a vouch').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('vouchchannel')
+        .setDescription('Set the vouch channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addChannelOption(opt =>
+            opt.setName('channel').setDescription('Channel for vouches').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('vcrole')
+        .setDescription('Set the role to give the ticket creator after the vouch flow')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addRoleOption(opt =>
+            opt.setName('role').setDescription('Role to assign').setRequired(true),
+        ),
+
+    // ── Sticky message commands ────────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('stick')
+        .setDescription('Stick a message to the bottom of this channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
+        .addStringOption(opt =>
+            opt.setName('message').setDescription('Message to stick').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('unstick')
+        .setDescription('Remove the sticky message from this channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -1381,6 +1511,315 @@ function startTimezoneInterval() {
     updateTimezoneDisplay();
 }
 
+// ─── Giveaway System ─────────────────────────────────────────────────────────
+
+const GIVEAWAYS_PATH = path.join(__dirname, 'giveaways.json');
+
+function loadGiveaways() {
+    if (!fs.existsSync(GIVEAWAYS_PATH)) return {};
+    try {
+        return JSON.parse(fs.readFileSync(GIVEAWAYS_PATH, 'utf8'));
+    } catch {
+        return {};
+    }
+}
+
+function saveGiveaways(data) {
+    fs.writeFileSync(GIVEAWAYS_PATH, JSON.stringify(data, null, 2), 'utf8');
+}
+
+const activeGiveawayTimers = new Map(); // giveawayId → setTimeout handle
+
+function parseDuration(str) {
+    const match = str.trim().match(/^(\d+)(s|m|h|d)$/i);
+    if (!match) return null;
+    const n = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    const multipliers = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+    return n * multipliers[unit];
+}
+
+function buildGiveawayEmbed(giveaway) {
+    const endTimeSec = Math.floor(giveaway.endTime / 1000);
+    const requirements = [];
+    if (giveaway.minInvites > 0) requirements.push(`📨 Minimum **${giveaway.minInvites}** invites`);
+    if (giveaway.requiredRoleId) requirements.push(`🏷️ Must have <@&${giveaway.requiredRoleId}> role`);
+
+    return new EmbedBuilder()
+        .setColor(0xFEE75C)
+        .setTitle('🎉 GIVEAWAY 🎉')
+        .setDescription(
+            `**Prize:** ${giveaway.prize}\n\n` +
+            `Click the 🎉 button below to enter!\n\n` +
+            `**Ends:** <t:${endTimeSec}:R> (<t:${endTimeSec}:f>)\n` +
+            (requirements.length > 0 ? `\n**Requirements:**\n${requirements.join('\n')}\n` : '') +
+            `\n**Hosted by:** <@${giveaway.hostId}>`,
+        )
+        .addFields(
+            { name: '🏆 Winners', value: `${giveaway.winners}`, inline: true },
+            { name: '👥 Entries', value: `${giveaway.participants.length}`, inline: true },
+        )
+        .setFooter({ text: `Giveaway ID: ${giveaway.id}` })
+        .setTimestamp(giveaway.endTime);
+}
+
+function buildGiveawayEndedEmbed(giveaway, winnerIds) {
+    return new EmbedBuilder()
+        .setColor(winnerIds.length > 0 ? 0x57F287 : 0xED4245)
+        .setTitle('🎉 GIVEAWAY ENDED 🎉')
+        .setDescription(
+            `**Prize:** ${giveaway.prize}\n\n` +
+            (winnerIds.length > 0
+                ? `🏆 **Winner${winnerIds.length > 1 ? 's' : ''}:** ${winnerIds.map(w => `<@${w}>`).join(', ')}`
+                : '😔 No eligible participants entered.'),
+        )
+        .addFields(
+            { name: '🏆 Winners', value: `${giveaway.winners}`, inline: true },
+            { name: '👥 Total Entries', value: `${giveaway.participants.length}`, inline: true },
+        )
+        .setFooter({ text: `Hosted by: ${giveaway.hostId}` })
+        .setTimestamp();
+}
+
+async function pickGiveawayWinners(giveaway, guild) {
+    if (giveaway.participants.length === 0) return [];
+    const eligible = [];
+    for (const userId of giveaway.participants) {
+        let pass = true;
+        if (giveaway.requiredRoleId) {
+            try {
+                const member = await guild.members.fetch(userId);
+                if (!member.roles.cache.has(giveaway.requiredRoleId)) pass = false;
+            } catch {
+                pass = false;
+            }
+        }
+        if (pass && giveaway.minInvites > 0) {
+            const invData = loadInvites();
+            const guildData = invData[guild.id] || {};
+            const userInv = (guildData.users || {})[userId] || {};
+            const total = (userInv.real || 0) + (userInv.bonus || 0) - (userInv.left || 0);
+            if (total < giveaway.minInvites) pass = false;
+        }
+        if (pass) eligible.push(userId);
+    }
+    const pool = [...eligible];
+    const winners = [];
+    const count = Math.min(giveaway.winners, pool.length);
+    for (let i = 0; i < count; i++) {
+        const idx = Math.floor(Math.random() * pool.length);
+        winners.push(pool[idx]);
+        pool[idx] = pool[pool.length - 1];
+        pool.pop();
+    }
+    return winners;
+}
+
+async function endGiveaway(giveawayId) {
+    const giveaways = loadGiveaways();
+    const giveaway = giveaways[giveawayId];
+    if (!giveaway || giveaway.ended) return;
+
+    giveaway.ended = true;
+
+    if (activeGiveawayTimers.has(giveawayId)) {
+        clearTimeout(activeGiveawayTimers.get(giveawayId));
+        activeGiveawayTimers.delete(giveawayId);
+    }
+
+    try {
+        const guild = await client.guilds.fetch(giveaway.guildId);
+        const channel = await client.channels.fetch(giveaway.channelId);
+        const message = await channel.messages.fetch(giveaway.messageId);
+        const winnerIds = await pickGiveawayWinners(giveaway, guild);
+        giveaway.winnerIds = winnerIds;
+
+        const endEmbed = buildGiveawayEndedEmbed(giveaway, winnerIds);
+        await message.edit({ embeds: [endEmbed], components: [] });
+
+        if (winnerIds.length > 0) {
+            await channel.send({
+                content: `🎉 Congratulations ${winnerIds.map(w => `<@${w}>`).join(', ')}! You won **${giveaway.prize}**!`,
+            });
+        } else {
+            await channel.send({ content: `😔 No eligible winners for **${giveaway.prize}**.` });
+        }
+    } catch (err) {
+        console.error(`Failed to end giveaway ${giveawayId}:`, err);
+    }
+
+    saveGiveaways(giveaways);
+}
+
+function scheduleGiveaway(giveawayId) {
+    const giveaways = loadGiveaways();
+    const giveaway = giveaways[giveawayId];
+    if (!giveaway || giveaway.ended) return;
+    const delay = Math.max(0, giveaway.endTime - Date.now());
+    const timer = setTimeout(() => endGiveaway(giveawayId), delay);
+    activeGiveawayTimers.set(giveawayId, timer);
+}
+
+function reloadGiveawayTimers() {
+    const giveaways = loadGiveaways();
+    for (const [id, giveaway] of Object.entries(giveaways)) {
+        if (!giveaway.ended) scheduleGiveaway(id);
+    }
+}
+
+// ─── Invite Tracking System ───────────────────────────────────────────────────
+
+const INVITES_PATH = path.join(__dirname, 'invites.json');
+
+function loadInvites() {
+    if (!fs.existsSync(INVITES_PATH)) return {};
+    try {
+        return JSON.parse(fs.readFileSync(INVITES_PATH, 'utf8'));
+    } catch {
+        return {};
+    }
+}
+
+function saveInvites(data) {
+    fs.writeFileSync(INVITES_PATH, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// Cache of invite uses per guild: guildId → Map(inviteCode → uses)
+const guildInviteCache = new Map();
+
+async function cacheGuildInvites(guild) {
+    try {
+        const invites = await guild.invites.fetch();
+        const cache = new Map();
+        invites.forEach(inv => cache.set(inv.code, inv.uses || 0));
+        guildInviteCache.set(guild.id, cache);
+    } catch (err) {
+        console.error(`Failed to cache invites for ${guild.id}:`, err);
+    }
+}
+
+// ─── Ticket Panel System ──────────────────────────────────────────────────────
+
+// Generate a short unique ID for ticket types
+function genId() {
+    return Math.random().toString(36).slice(2, 8);
+}
+
+function getTicketConfig(guildId) {
+    const config = loadConfig();
+    if (!config.ticketConfig) config.ticketConfig = {};
+    if (!config.ticketConfig[guildId]) config.ticketConfig[guildId] = { types: [] };
+    return config.ticketConfig[guildId];
+}
+
+function saveTicketConfig(guildId, tConf) {
+    const config = loadConfig();
+    if (!config.ticketConfig) config.ticketConfig = {};
+    config.ticketConfig[guildId] = tConf;
+    saveConfig(config);
+}
+
+function getOpenTickets(guildId) {
+    const config = loadConfig();
+    if (!config.openTickets) config.openTickets = {};
+    if (!config.openTickets[guildId]) config.openTickets[guildId] = {};
+    return config.openTickets[guildId];
+}
+
+function saveOpenTickets(guildId, tickets) {
+    const config = loadConfig();
+    if (!config.openTickets) config.openTickets = {};
+    config.openTickets[guildId] = tickets;
+    saveConfig(config);
+}
+
+function countUserOpenTickets(guildId, userId) {
+    const tickets = getOpenTickets(guildId);
+    return Object.values(tickets).filter(t => t.userId === userId).length;
+}
+
+function buildTicketPanelSettingsEmbed(guildId) {
+    const tConf = getTicketConfig(guildId);
+    const types = tConf.types || [];
+    const lines = types.length > 0
+        ? types.map((t, i) => `**${i + 1}.** ${t.name} — ${t.questions.length} question(s), ${t.viewableRoles.length} role(s)`)
+        : ['No ticket types configured yet. Add one below!'];
+    return new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('🎫 Ticket Panel Configuration')
+        .setDescription('Manage your ticket types below. Configure each type\'s name, category, questions, and viewable roles.')
+        .addFields({ name: 'Current Ticket Types', value: lines.join('\n') })
+        .setFooter({ text: 'Select a type to configure it, or add a new one.' });
+}
+
+function buildTypeConfigEmbed(type) {
+    const roleStr = type.viewableRoles.length > 0
+        ? type.viewableRoles.map(r => `<@&${r}>`).join(', ')
+        : 'None';
+    const qStr = type.questions.length > 0
+        ? type.questions.map((q, i) => `${i + 1}. ${q}`).join('\n')
+        : 'No questions set.';
+    return new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle(`⚙️ Configuring: ${type.name}`)
+        .addFields(
+            { name: '🗂️ Category', value: type.categoryId ? `<#${type.categoryId}>` : 'Not set', inline: true },
+            { name: '👁️ Viewable Roles', value: roleStr, inline: true },
+            { name: '❓ Questions', value: qStr },
+        )
+        .setFooter({ text: `Type ID: ${type.id}` });
+}
+
+function buildTicketSettingsComponents(guildId) {
+    const tConf = getTicketConfig(guildId);
+    const types = tConf.types || [];
+
+    const selectOptions = types.slice(0, 24).map(t =>
+        new StringSelectMenuOptionBuilder()
+            .setLabel(t.name.slice(0, 100))
+            .setValue(t.id)
+            .setDescription(`${t.questions.length} question(s)`),
+    );
+    selectOptions.unshift(
+        new StringSelectMenuOptionBuilder()
+            .setLabel('➕ Add New Ticket Type')
+            .setValue('__add_new__')
+            .setDescription('Create a new ticket type'),
+    );
+
+    const select = new StringSelectMenuBuilder()
+        .setCustomId('tp_main_select')
+        .setPlaceholder('Select a ticket type to configure...')
+        .addOptions(selectOptions);
+
+    const postBtn = new ButtonBuilder()
+        .setCustomId('tp_post_panel')
+        .setLabel('📋 Post Ticket Panel')
+        .setStyle(ButtonStyle.Success);
+
+    return [
+        new ActionRowBuilder().addComponents(select),
+        new ActionRowBuilder().addComponents(postBtn),
+    ];
+}
+
+function buildTypeConfigComponents(typeId) {
+    const row1 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`tp_cfg_name:${typeId}`).setLabel('✏️ Edit Name').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`tp_cfg_category:${typeId}`).setLabel('🗂️ Set Category').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`tp_cfg_questions:${typeId}`).setLabel('❓ Set Questions').setStyle(ButtonStyle.Primary),
+    );
+    const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`tp_cfg_roles:${typeId}`).setLabel('👁️ Set Viewable Roles').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`tp_cfg_delete:${typeId}`).setLabel('🗑️ Delete Type').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('tp_cfg_back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
+    );
+    return [row1, row2];
+}
+
+// In-memory map for pending vc timers: ticketChannelId -> { creatorId, guildId, timer }
+const vcTimers = new Map();
+
 // ─── Discord client ───────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -1389,10 +1828,11 @@ const client = new Client({
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildInvites,
     ],
 });
 
-client.once('ready', () => {
+client.once('ready', async () => {
     console.log(`Bot is ready! Logged in as ${client.user.tag}`);
     const config = loadConfig();
     if (config.leaderboardChannelId) {
@@ -1404,6 +1844,10 @@ client.once('ready', () => {
     if (config.orderChannelId) {
         startOrderPolling();
     }
+    // Reload active giveaway timers
+    reloadGiveawayTimers();
+    // Cache guild invites for invite tracking
+    await Promise.all([...client.guilds.cache.values()].map(guild => cacheGuildInvites(guild)));
 });
 
 client.on('interactionCreate', async interaction => {
@@ -2869,7 +3313,826 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ embeds: [verifyEmbed], components: [row] });
         return;
     }
+
+    // ── /giveaway start ──────────────────────────────────────────────────────
+    if (interaction.commandName === 'giveaway' && interaction.options.getSubcommand() === 'start') {
+        const prize = interaction.options.getString('prize');
+        const durationStr = interaction.options.getString('duration');
+        const winnersCount = interaction.options.getInteger('winners');
+        const channelOpt = interaction.options.getChannel('channel');
+        const minInvites = interaction.options.getInteger('min_invites') || 0;
+        const requiredRole = interaction.options.getRole('required_role');
+
+        const durationMs = parseDuration(durationStr);
+        if (!durationMs) {
+            await interaction.reply({
+                embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('❌ Invalid Duration').setDescription('Use formats like `1h`, `30m`, or `1d`. Combined units like `2h30m` are not supported — pick a single unit.')],
+                ephemeral: true,
+            });
+            return;
+        }
+
+        const targetChannel = channelOpt || interaction.channel;
+        const endTime = Date.now() + durationMs;
+        const giveawayId = genId();
+
+        const giveaway = {
+            id: giveawayId,
+            guildId: interaction.guild.id,
+            channelId: targetChannel.id,
+            messageId: null,
+            prize,
+            winners: winnersCount,
+            endTime,
+            minInvites,
+            requiredRoleId: requiredRole ? requiredRole.id : null,
+            participants: [],
+            ended: false,
+            hostId: interaction.user.id,
+            winnerIds: [],
+        };
+
+        const embed = buildGiveawayEmbed(giveaway);
+        const enterBtn = new ButtonBuilder()
+            .setCustomId(`giveaway_enter:${giveawayId}`)
+            .setLabel('🎉 Enter Giveaway')
+            .setStyle(ButtonStyle.Primary);
+        const row = new ActionRowBuilder().addComponents(enterBtn);
+
+        const msg = await targetChannel.send({ embeds: [embed], components: [row] });
+        giveaway.messageId = msg.id;
+
+        const giveaways = loadGiveaways();
+        giveaways[giveawayId] = giveaway;
+        saveGiveaways(giveaways);
+
+        scheduleGiveaway(giveawayId);
+
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Giveaway Started').setDescription(`Giveaway for **${prize}** started in <#${targetChannel.id}>!`)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── /giveaway end ────────────────────────────────────────────────────────
+    if (interaction.commandName === 'giveaway' && interaction.options.getSubcommand() === 'end') {
+        const messageId = interaction.options.getString('message_id');
+        const giveaways = loadGiveaways();
+        let found = null;
+
+        if (messageId) {
+            found = Object.values(giveaways).find(g => g.messageId === messageId && g.guildId === interaction.guild.id && !g.ended);
+        } else {
+            found = Object.values(giveaways).find(g => g.channelId === interaction.channel.id && g.guildId === interaction.guild.id && !g.ended);
+        }
+
+        if (!found) {
+            await interaction.reply({ content: '❌ No active giveaway found.', ephemeral: true });
+            return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+        await endGiveaway(found.id);
+        await interaction.editReply({ content: `✅ Giveaway for **${found.prize}** has been ended.` });
+        return;
+    }
+
+    // ── /giveaway reroll ─────────────────────────────────────────────────────
+    if (interaction.commandName === 'giveaway' && interaction.options.getSubcommand() === 'reroll') {
+        const messageId = interaction.options.getString('message_id');
+        const giveaways = loadGiveaways();
+        let found = null;
+
+        if (messageId) {
+            found = Object.values(giveaways).find(g => g.messageId === messageId && g.guildId === interaction.guild.id && g.ended);
+        } else {
+            found = Object.values(giveaways).find(g => g.channelId === interaction.channel.id && g.guildId === interaction.guild.id && g.ended);
+        }
+
+        if (!found) {
+            await interaction.reply({ content: '❌ No ended giveaway found to reroll.', ephemeral: true });
+            return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+        const guild = await client.guilds.fetch(found.guildId);
+        const winnerIds = await pickGiveawayWinners(found, guild);
+        found.winnerIds = winnerIds;
+        giveaways[found.id] = found;
+        saveGiveaways(giveaways);
+
+        const channel = await client.channels.fetch(found.channelId).catch(() => null);
+        if (channel) {
+            const endEmbed = buildGiveawayEndedEmbed(found, winnerIds);
+            try {
+                const msg = await channel.messages.fetch(found.messageId);
+                await msg.edit({ embeds: [endEmbed], components: [] });
+            } catch { /* message deleted */ }
+            if (winnerIds.length > 0) {
+                await channel.send({ content: `🎉 Reroll! Congratulations ${winnerIds.map(w => `<@${w}>`).join(', ')}! You won **${found.prize}**!` });
+            } else {
+                await channel.send({ content: `😔 No eligible winners for the reroll of **${found.prize}**.` });
+            }
+        }
+        await interaction.editReply({ content: `✅ Rerolled winners for **${found.prize}**.` });
+        return;
+    }
+
+    // ── Button: Giveaway Enter ───────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter:')) {
+        const giveawayId = interaction.customId.slice('giveaway_enter:'.length);
+        const giveaways = loadGiveaways();
+        const giveaway = giveaways[giveawayId];
+
+        if (!giveaway || giveaway.ended) {
+            await interaction.reply({ content: '❌ This giveaway has already ended.', ephemeral: true });
+            return;
+        }
+
+        if (giveaway.participants.includes(interaction.user.id)) {
+            // Toggle: allow leaving
+            giveaway.participants = giveaway.participants.filter(p => p !== interaction.user.id);
+            saveGiveaways(giveaways);
+            // Update embed
+            try {
+                const embed = buildGiveawayEmbed(giveaway);
+                await interaction.update({ embeds: [embed], components: interaction.message.components });
+            } catch {
+                await interaction.reply({ content: '↩️ You have left the giveaway.', ephemeral: true });
+            }
+            return;
+        }
+
+        giveaway.participants.push(interaction.user.id);
+        saveGiveaways(giveaways);
+
+        try {
+            const embed = buildGiveawayEmbed(giveaway);
+            await interaction.update({ embeds: [embed], components: interaction.message.components });
+        } catch {
+            await interaction.reply({ content: '🎉 You have entered the giveaway!', ephemeral: true });
+        }
+        return;
+    }
+
+    // ── /ticket panel ────────────────────────────────────────────────────────
+    if (interaction.commandName === 'ticket' && interaction.options.getSubcommand() === 'panel') {
+        const embed = buildTicketPanelSettingsEmbed(interaction.guild.id);
+        const components = buildTicketSettingsComponents(interaction.guild.id);
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
+        return;
+    }
+
+    // ── Select: Ticket panel main select ────────────────────────────────────
+    if (interaction.isStringSelectMenu() && interaction.customId === 'tp_main_select') {
+        const selected = interaction.values[0];
+
+        if (selected === '__add_new__') {
+            const modal = new ModalBuilder()
+                .setCustomId('tp_modal_new_type')
+                .setTitle('Add New Ticket Type');
+            const nameInput = new TextInputBuilder()
+                .setCustomId('type_name')
+                .setLabel('Ticket Type Name')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('e.g. General Support')
+                .setRequired(true)
+                .setMaxLength(50);
+            modal.addComponents(new ActionRowBuilder().addComponents(nameInput));
+            await interaction.showModal(modal);
+            return;
+        }
+
+        // Show config for selected type
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === selected);
+        if (!type) {
+            await interaction.reply({ content: '❌ Ticket type not found.', ephemeral: true });
+            return;
+        }
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(type.id);
+        await interaction.update({ embeds: [embed], components });
+        return;
+    }
+
+    // ── Button: Ticket config — back ─────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'tp_cfg_back') {
+        const embed = buildTicketPanelSettingsEmbed(interaction.guild.id);
+        const components = buildTicketSettingsComponents(interaction.guild.id);
+        await interaction.update({ embeds: [embed], components });
+        return;
+    }
+
+    // ── Button: Ticket config — edit name ────────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_name:')) {
+        const typeId = interaction.customId.slice('tp_cfg_name:'.length);
+        const modal = new ModalBuilder().setCustomId(`tp_modal_name:${typeId}`).setTitle('Edit Ticket Type Name');
+        const input = new TextInputBuilder().setCustomId('type_name').setLabel('New Name').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(50);
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Button: Ticket config — set category ─────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_category:')) {
+        const typeId = interaction.customId.slice('tp_cfg_category:'.length);
+        const modal = new ModalBuilder().setCustomId(`tp_modal_category:${typeId}`).setTitle('Set Ticket Category');
+        const input = new TextInputBuilder().setCustomId('category_id').setLabel('Category Channel ID').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click category → Copy ID');
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Button: Ticket config — set questions ────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_questions:')) {
+        const typeId = interaction.customId.slice('tp_cfg_questions:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        const existing = type ? type.questions : [];
+        const modal = new ModalBuilder().setCustomId(`tp_modal_questions:${typeId}`).setTitle('Set Questions (up to 5)');
+        for (let i = 0; i < 5; i++) {
+            const field = new TextInputBuilder()
+                .setCustomId(`q${i}`)
+                .setLabel(`Question ${i + 1}${i === 0 ? ' (required)' : ' (optional)'}`)
+                .setStyle(TextInputStyle.Short)
+                .setRequired(i === 0)
+                .setMaxLength(100)
+                .setValue(existing[i] || '');
+            modal.addComponents(new ActionRowBuilder().addComponents(field));
+        }
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Button: Ticket config — set viewable roles ───────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_roles:')) {
+        const typeId = interaction.customId.slice('tp_cfg_roles:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        const existing = type ? type.viewableRoles.join(', ') : '';
+        const modal = new ModalBuilder().setCustomId(`tp_modal_roles:${typeId}`).setTitle('Set Viewable Roles');
+        const input = new TextInputBuilder()
+            .setCustomId('role_ids')
+            .setLabel('Role IDs (comma-separated)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setPlaceholder('123456789, 987654321')
+            .setValue(existing);
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Button: Ticket config — delete type ──────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_delete:')) {
+        const typeId = interaction.customId.slice('tp_cfg_delete:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        tConf.types = tConf.types.filter(t => t.id !== typeId);
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTicketPanelSettingsEmbed(interaction.guild.id);
+        const components = buildTicketSettingsComponents(interaction.guild.id);
+        await interaction.update({ embeds: [embed], components });
+        return;
+    }
+
+    // ── Button: Post ticket panel ────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'tp_post_panel') {
+        const tConf = getTicketConfig(interaction.guild.id);
+        const types = tConf.types || [];
+        if (types.length === 0) {
+            await interaction.reply({ content: '❌ No ticket types configured. Add at least one type first.', ephemeral: true });
+            return;
+        }
+        const panelEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🎫 Support Tickets')
+            .setDescription('Click a button below to open a ticket.')
+            .addFields(types.map(t => ({ name: t.name, value: t.questions.length > 0 ? `${t.questions.length} question(s)` : 'No questions', inline: true })));
+
+        const rows = [];
+        for (let i = 0; i < types.length; i += 5) {
+            const slice = types.slice(i, i + 5);
+            const row = new ActionRowBuilder().addComponents(
+                slice.map(t =>
+                    new ButtonBuilder()
+                        .setCustomId(`ticket_open:${t.id}`)
+                        .setLabel(t.name.slice(0, 80))
+                        .setStyle(ButtonStyle.Primary),
+                ),
+            );
+            rows.push(row);
+            if (rows.length >= 5) break;
+        }
+
+        await interaction.channel.send({ embeds: [panelEmbed], components: rows });
+        await interaction.reply({ content: '✅ Ticket panel posted!', ephemeral: true });
+        return;
+    }
+
+    // ── Modal: New ticket type ───────────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId === 'tp_modal_new_type') {
+        const name = interaction.fields.getTextInputValue('type_name').trim();
+        const tConf = getTicketConfig(interaction.guild.id);
+        const newType = { id: genId(), name, categoryId: null, questions: [], viewableRoles: [] };
+        tConf.types.push(newType);
+        saveTicketConfig(interaction.guild.id, tConf);
+
+        const embed = buildTypeConfigEmbed(newType);
+        const components = buildTypeConfigComponents(newType.id);
+        await interaction.update({ embeds: [embed], components });
+        return;
+    }
+
+    // ── Modal: Edit ticket type name ─────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_name:')) {
+        const typeId = interaction.customId.slice('tp_modal_name:'.length);
+        const newName = interaction.fields.getTextInputValue('type_name').trim();
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        type.name = newName;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ embeds: [embed], components });
+        return;
+    }
+
+    // ── Modal: Set ticket category ───────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_category:')) {
+        const typeId = interaction.customId.slice('tp_modal_category:'.length);
+        const catId = interaction.fields.getTextInputValue('category_id').trim();
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        type.categoryId = catId;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ embeds: [embed], components });
+        return;
+    }
+
+    // ── Modal: Set ticket questions ──────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_questions:')) {
+        const typeId = interaction.customId.slice('tp_modal_questions:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        const questions = [];
+        for (let i = 0; i < 5; i++) {
+            try {
+                const val = interaction.fields.getTextInputValue(`q${i}`).trim();
+                if (val) questions.push(val);
+            } catch { /* field not present */ }
+        }
+        type.questions = questions;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ embeds: [embed], components });
+        return;
+    }
+
+    // ── Modal: Set ticket viewable roles ────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_roles:')) {
+        const typeId = interaction.customId.slice('tp_modal_roles:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        const raw = interaction.fields.getTextInputValue('role_ids');
+        const roleIds = raw.split(',').map(r => r.trim()).filter(r => /^\d+$/.test(r));
+        type.viewableRoles = roleIds;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ embeds: [embed], components });
+        return;
+    }
+
+    // ── Button: Open ticket ──────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('ticket_open:')) {
+        const typeId = interaction.customId.slice('ticket_open:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) {
+            await interaction.reply({ content: '❌ Ticket type not found.', ephemeral: true });
+            return;
+        }
+
+        // Check 3 open ticket limit
+        const openCount = countUserOpenTickets(interaction.guild.id, interaction.user.id);
+        if (openCount >= 3) {
+            await interaction.reply({ content: '❌ You can only have **3 tickets** open at once.', ephemeral: true });
+            return;
+        }
+
+        // Show modal with questions
+        if (type.questions.length > 0) {
+            const modal = new ModalBuilder()
+                .setCustomId(`ticket_modal_open:${typeId}`)
+                .setTitle(`Open Ticket: ${type.name.slice(0, 40)}`);
+            for (let i = 0; i < Math.min(type.questions.length, 5); i++) {
+                const field = new TextInputBuilder()
+                    .setCustomId(`q${i}`)
+                    .setLabel(type.questions[i].slice(0, 45))
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setRequired(true)
+                    .setMaxLength(1000);
+                modal.addComponents(new ActionRowBuilder().addComponents(field));
+            }
+            await interaction.showModal(modal);
+        } else {
+            // No questions — create ticket directly
+            await interaction.deferReply({ ephemeral: true });
+            await createTicketChannel(interaction.guild, interaction.member, type, [], interaction.channel);
+            await interaction.editReply({ content: '✅ Your ticket has been created!' });
+        }
+        return;
+    }
+
+    // ── Modal: Open ticket with questions ───────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal_open:')) {
+        const typeId = interaction.customId.slice('ticket_modal_open:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Ticket type not found.', ephemeral: true }); return; }
+
+        const openCount = countUserOpenTickets(interaction.guild.id, interaction.user.id);
+        if (openCount >= 3) {
+            await interaction.reply({ content: '❌ You can only have **3 tickets** open at once.', ephemeral: true });
+            return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+        const answers = [];
+        for (let i = 0; i < Math.min(type.questions.length, 5); i++) {
+            try {
+                answers.push({ q: type.questions[i], a: interaction.fields.getTextInputValue(`q${i}`) });
+            } catch { /* missing */ }
+        }
+
+        const channel = await createTicketChannel(interaction.guild, interaction.member, type, answers, null);
+        await interaction.editReply({ content: channel ? `✅ Your ticket has been created: <#${channel.id}>` : '❌ Failed to create ticket.' });
+        return;
+    }
+
+    // ── Button: Close ticket ─────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'ticket_close') {
+        const modal = new ModalBuilder()
+            .setCustomId(`ticket_modal_close:${interaction.channel.id}`)
+            .setTitle('Close Ticket');
+        const reasonInput = new TextInputBuilder()
+            .setCustomId('reason')
+            .setLabel('Reason for closing')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(false)
+            .setMaxLength(500)
+            .setPlaceholder('Optional reason...');
+        modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Modal: Close ticket reason ───────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal_close:')) {
+        const channelId = interaction.customId.slice('ticket_modal_close:'.length);
+        const reason = interaction.fields.getTextInputValue('reason').trim() || 'No reason provided.';
+
+        const openTickets = getOpenTickets(interaction.guild.id);
+        const ticket = openTickets[channelId];
+
+        if (ticket) {
+            // DM the ticket creator
+            try {
+                const creator = await client.users.fetch(ticket.userId);
+                const dmEmbed = new EmbedBuilder()
+                    .setColor(0xED4245)
+                    .setTitle('🎫 Your ticket has been closed')
+                    .addFields(
+                        { name: '🔒 Reason', value: reason },
+                        { name: '📋 Channel', value: `#${interaction.channel.name}` },
+                        { name: '👤 Closed by', value: interaction.user.tag },
+                    )
+                    .setTimestamp();
+                await creator.send({ embeds: [dmEmbed] });
+            } catch { /* DMs disabled */ }
+
+            delete openTickets[channelId];
+            saveOpenTickets(interaction.guild.id, openTickets);
+        }
+
+        await interaction.reply({ content: `🔒 Closing ticket...` });
+        try {
+            await interaction.channel.delete();
+        } catch (err) {
+            console.error('Failed to delete ticket channel:', err);
+        }
+        return;
+    }
+
+    // ── Button: Private ticket ───────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'ticket_private') {
+        const openTickets = getOpenTickets(interaction.guild.id);
+        const ticket = openTickets[interaction.channel.id];
+        if (!ticket) {
+            await interaction.reply({ content: '❌ Ticket data not found.', ephemeral: true });
+            return;
+        }
+
+        if (ticket.isPrivate) {
+            await interaction.reply({ content: '🔒 This ticket is already private.', ephemeral: true });
+            return;
+        }
+
+        ticket.isPrivate = true;
+        saveOpenTickets(interaction.guild.id, openTickets);
+
+        // Remove viewable roles access
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === ticket.typeId);
+        if (type) {
+            for (const roleId of type.viewableRoles) {
+                try {
+                    await interaction.channel.permissionOverwrites.delete(roleId);
+                } catch { /* role may not exist */ }
+            }
+        }
+
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('🔒 Ticket is now Private').setDescription('Only admins and the ticket creator can view this ticket.')],
+        });
+        return;
+    }
+
+    // ── /invites ─────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'invites') {
+        const target = interaction.options.getUser('user') || interaction.user;
+        const invData = loadInvites();
+        const guildData = invData[interaction.guild.id] || {};
+        const userInv = (guildData.users || {})[target.id] || { real: 0, left: 0, fake: 0, bonus: 0 };
+        const total = (userInv.real || 0) + (userInv.bonus || 0) - (userInv.left || 0);
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x5865F2)
+                    .setTitle(`📨 Invites — ${target.username}`)
+                    .addFields(
+                        { name: '✅ Total', value: `${total}`, inline: true },
+                        { name: '📥 Real', value: `${userInv.real || 0}`, inline: true },
+                        { name: '📤 Left', value: `${userInv.left || 0}`, inline: true },
+                        { name: '🎁 Bonus', value: `${userInv.bonus || 0}`, inline: true },
+                        { name: '🤖 Fake', value: `${userInv.fake || 0}`, inline: true },
+                    )
+                    .setThumbnail(target.displayAvatarURL({ size: 64 }))
+                    .setTimestamp(),
+            ],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── /resetinvites ────────────────────────────────────────────────────────
+    if (interaction.commandName === 'resetinvites') {
+        const target = interaction.options.getUser('user');
+        const invData = loadInvites();
+        if (!invData[interaction.guild.id]) invData[interaction.guild.id] = { users: {} };
+        if (!invData[interaction.guild.id].users) invData[interaction.guild.id].users = {};
+        invData[interaction.guild.id].users[target.id] = { real: 0, left: 0, fake: 0, bonus: 0 };
+        saveInvites(invData);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Invites Reset').setDescription(`Reset invite count for <@${target.id}>.`)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── /addinvites ──────────────────────────────────────────────────────────
+    if (interaction.commandName === 'addinvites') {
+        const target = interaction.options.getUser('user');
+        const amount = interaction.options.getInteger('amount');
+        const invData = loadInvites();
+        if (!invData[interaction.guild.id]) invData[interaction.guild.id] = { users: {} };
+        if (!invData[interaction.guild.id].users) invData[interaction.guild.id].users = {};
+        if (!invData[interaction.guild.id].users[target.id]) invData[interaction.guild.id].users[target.id] = { real: 0, left: 0, fake: 0, bonus: 0 };
+        invData[interaction.guild.id].users[target.id].bonus = (invData[interaction.guild.id].users[target.id].bonus || 0) + amount;
+        saveInvites(invData);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Invites Added').setDescription(`Added **${amount}** bonus invite${amount !== 1 ? 's' : ''} to <@${target.id}>.`)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── /invitechannel ───────────────────────────────────────────────────────
+    if (interaction.commandName === 'invitechannel') {
+        const channel = interaction.options.getChannel('channel');
+        const invData = loadInvites();
+        if (!invData[interaction.guild.id]) invData[interaction.guild.id] = { users: {} };
+        invData[interaction.guild.id].inviteChannel = channel.id;
+        saveInvites(invData);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Invite Channel Set').setDescription(`Invite join messages will be posted in <#${channel.id}>.`)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── /vc ──────────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'vc') {
+        const targetUser = interaction.options.getUser('user');
+        const config = loadConfig();
+        const vouchChannelId = config.vouchChannel;
+        if (!vouchChannelId) {
+            await interaction.reply({ content: '❌ No vouch channel set. Use `/vouchchannel` first.', ephemeral: true });
+            return;
+        }
+
+        // This should be used inside a ticket channel
+        const openTickets = getOpenTickets(interaction.guild.id);
+        const ticket = openTickets[interaction.channel.id];
+
+        await interaction.reply({
+            content: `${targetUser} please head on over to <#${vouchChannelId}> and vouch us! 🎉`,
+        });
+
+        if (ticket) {
+            // Start 10-minute timer to auto-close ticket and assign vc role
+            const VC_TIMER_MS = 10 * 60 * 1000;
+            const creatorId = ticket.userId;
+            const guildId = interaction.guild.id;
+            const channelId = interaction.channel.id;
+
+            if (vcTimers.has(channelId)) {
+                clearTimeout(vcTimers.get(channelId).timer);
+            }
+
+            const timer = setTimeout(async () => {
+                vcTimers.delete(channelId);
+                try {
+                    // Assign vc role to ticket creator
+                    const freshConfig = loadConfig();
+                    const vcRoleId = freshConfig.vcRole;
+                    if (vcRoleId) {
+                        const guild = await client.guilds.fetch(guildId);
+                        const member = await guild.members.fetch(creatorId);
+                        await member.roles.add(vcRoleId);
+                    }
+                    // Close the ticket
+                    const ch = await client.channels.fetch(channelId);
+                    if (ch) {
+                        const freshTickets = getOpenTickets(guildId);
+                        delete freshTickets[channelId];
+                        saveOpenTickets(guildId, freshTickets);
+                        await ch.delete();
+                    }
+                } catch (err) {
+                    console.error('vc timer error:', err);
+                }
+            }, VC_TIMER_MS);
+
+            vcTimers.set(channelId, { creatorId, guildId, timer });
+        }
+        return;
+    }
+
+    // ── /vouchchannel ────────────────────────────────────────────────────────
+    if (interaction.commandName === 'vouchchannel') {
+        const channel = interaction.options.getChannel('channel');
+        const config = loadConfig();
+        config.vouchChannel = channel.id;
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Vouch Channel Set').setDescription(`Vouch requests will reference <#${channel.id}>.`)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── /vcrole ──────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'vcrole') {
+        const role = interaction.options.getRole('role');
+        const config = loadConfig();
+        config.vcRole = role.id;
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ VC Role Set').setDescription(`<@&${role.id}> will be assigned to the ticket creator after the vouch flow.`)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── /stick ───────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'stick') {
+        const message = interaction.options.getString('message');
+        const config = loadConfig();
+        if (!config.stickyMessages) config.stickyMessages = {};
+
+        // Delete existing sticky if present
+        const existing = config.stickyMessages[interaction.channel.id];
+        if (existing && existing.messageId) {
+            try {
+                const oldMsg = await interaction.channel.messages.fetch(existing.messageId);
+                await oldMsg.delete();
+            } catch { /* already deleted */ }
+        }
+
+        const sent = await interaction.channel.send({ content: `📌 ${message}` });
+        config.stickyMessages[interaction.channel.id] = { content: message, messageId: sent.id };
+        saveConfig(config);
+
+        await interaction.reply({ content: '📌 Message stuck!', ephemeral: true });
+        return;
+    }
+
+    // ── /unstick ─────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'unstick') {
+        const config = loadConfig();
+        if (!config.stickyMessages) config.stickyMessages = {};
+        const existing = config.stickyMessages[interaction.channel.id];
+        if (!existing) {
+            await interaction.reply({ content: '❌ No sticky message in this channel.', ephemeral: true });
+            return;
+        }
+        if (existing.messageId) {
+            try {
+                const msg = await interaction.channel.messages.fetch(existing.messageId);
+                await msg.delete();
+            } catch { /* already deleted */ }
+        }
+        delete config.stickyMessages[interaction.channel.id];
+        saveConfig(config);
+        await interaction.reply({ content: '✅ Sticky message removed.', ephemeral: true });
+        return;
+    }
 });
+
+// ─── Helper: Create ticket channel ───────────────────────────────────────────
+
+async function createTicketChannel(guild, member, type, answers, fallbackChannel) {
+    try {
+        const channelName = `ticket-${member.user.username.slice(0, 20).replace(/[^a-z0-9]/gi, '').toLowerCase() || 'user'}-${Date.now().toString(36).slice(-4)}`;
+
+        const permOverwrites = [
+            { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+            { id: member.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+        ];
+
+        // Add viewable roles
+        for (const roleId of type.viewableRoles) {
+            permOverwrites.push({
+                id: roleId,
+                allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+            });
+        }
+
+        // Add bot itself
+        permOverwrites.push({
+            id: guild.members.me.id,
+            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels],
+        });
+
+        const channelOptions = {
+            name: channelName,
+            type: ChannelType.GuildText,
+            permissionOverwrites: permOverwrites,
+        };
+
+        if (type.categoryId) {
+            channelOptions.parent = type.categoryId;
+        }
+
+        const channel = await guild.channels.create(channelOptions);
+
+        // Save to open tickets
+        const openTickets = getOpenTickets(guild.id);
+        openTickets[channel.id] = { userId: member.id, typeId: type.id, guildId: guild.id, isPrivate: false };
+        saveOpenTickets(guild.id, openTickets);
+
+        // Build ticket embed with answers
+        const ticketEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle(`🎫 ${type.name}`)
+            .setDescription(`Ticket opened by <@${member.id}>`)
+            .setTimestamp();
+
+        if (answers.length > 0) {
+            ticketEmbed.addFields(answers.map(a => ({ name: a.q.slice(0, 256), value: a.a.slice(0, 1024) })));
+        }
+
+        const closeBtn = new ButtonBuilder().setCustomId('ticket_close').setLabel('🔒 Close Ticket').setStyle(ButtonStyle.Danger);
+        const privateBtn = new ButtonBuilder().setCustomId('ticket_private').setLabel('🔐 Private Ticket').setStyle(ButtonStyle.Secondary);
+        const row = new ActionRowBuilder().addComponents(closeBtn, privateBtn);
+
+        await channel.send({ content: `<@${member.id}>`, embeds: [ticketEmbed], components: [row] });
+        return channel;
+    } catch (err) {
+        console.error('Failed to create ticket channel:', err);
+        return null;
+    }
+}
 
 // ─── Channel Delete: Transcript to owner ──────────────────────────────────────
 
@@ -2957,6 +4220,139 @@ client.on('channelDelete', async channel => {
     } catch (err) {
         console.error('Failed to send channel delete transcript:', err);
     }
+});
+
+// ─── Sticky Messages ──────────────────────────────────────────────────────────
+
+// Track channels currently being re-posted to avoid infinite loops
+const stickyLock = new Set();
+
+client.on('messageCreate', async message => {
+    if (!message.guild) return;
+    // Ignore the bot's own messages for sticky to avoid infinite loops
+    if (message.author.id === client.user?.id) return;
+
+    const config = loadConfig();
+    if (!config.stickyMessages) return;
+    const sticky = config.stickyMessages[message.channel.id];
+    if (!sticky) return;
+    if (stickyLock.has(message.channel.id)) return;
+
+    stickyLock.add(message.channel.id);
+    try {
+        // Delete old sticky
+        if (sticky.messageId) {
+            try {
+                const oldMsg = await message.channel.messages.fetch(sticky.messageId);
+                await oldMsg.delete();
+            } catch { /* already gone */ }
+        }
+        // Re-post at the bottom
+        const sent = await message.channel.send({ content: `📌 ${sticky.content}` });
+        const freshConfig = loadConfig();
+        if (!freshConfig.stickyMessages) freshConfig.stickyMessages = {};
+        if (freshConfig.stickyMessages[message.channel.id]) {
+            freshConfig.stickyMessages[message.channel.id].messageId = sent.id;
+            saveConfig(freshConfig);
+        }
+    } catch (err) {
+        console.error('Sticky message error:', err);
+    } finally {
+        stickyLock.delete(message.channel.id);
+    }
+});
+
+// ─── Invite Tracking — guildCreate ───────────────────────────────────────────
+
+client.on('guildCreate', async guild => {
+    await cacheGuildInvites(guild);
+});
+
+// ─── Invite Tracking — guildMemberAdd ────────────────────────────────────────
+
+client.on('guildMemberAdd', async member => {
+    const guild = member.guild;
+    // Re-cache after join so we can detect which invite was used
+    let newCache;
+    try {
+        const fetched = await guild.invites.fetch();
+        newCache = new Map();
+        fetched.forEach(inv => newCache.set(inv.code, inv.uses || 0));
+    } catch {
+        return;
+    }
+
+    const oldCache = guildInviteCache.get(guild.id) || new Map();
+
+    // Find the invite whose use count increased
+    let usedInvite = null;
+    for (const [code, uses] of newCache) {
+        const prev = oldCache.get(code) || 0;
+        if (uses > prev) {
+            usedInvite = { code, uses, inviterId: null };
+            break;
+        }
+    }
+
+    // Update cache
+    guildInviteCache.set(guild.id, newCache);
+
+    if (!usedInvite) return;
+
+    // Look up inviter from Discord API
+    let inviterId = null;
+    try {
+        const fetchedInvites = await guild.invites.fetch();
+        const inv = fetchedInvites.get(usedInvite.code);
+        if (inv && inv.inviter) inviterId = inv.inviter.id;
+    } catch { /* fallback: skip */ }
+
+    if (!inviterId) return;
+
+    // Update invite tracking data
+    const invData = loadInvites();
+    if (!invData[guild.id]) invData[guild.id] = { users: {}, inviterMap: {} };
+    if (!invData[guild.id].users) invData[guild.id].users = {};
+    if (!invData[guild.id].inviterMap) invData[guild.id].inviterMap = {};
+
+    if (!invData[guild.id].users[inviterId]) {
+        invData[guild.id].users[inviterId] = { real: 0, left: 0, fake: 0, bonus: 0 };
+    }
+    invData[guild.id].users[inviterId].real = (invData[guild.id].users[inviterId].real || 0) + 1;
+    invData[guild.id].inviterMap[member.id] = inviterId;
+    saveInvites(invData);
+
+    // Post to invite channel
+    const channelId = invData[guild.id].inviteChannel;
+    if (!channelId) return;
+
+    const total =
+        (invData[guild.id].users[inviterId].real || 0) +
+        (invData[guild.id].users[inviterId].bonus || 0) -
+        (invData[guild.id].users[inviterId].left || 0);
+
+    const inviteChannel = await client.channels.fetch(channelId).catch(() => null);
+    if (!inviteChannel) return;
+
+    await inviteChannel.send({
+        content: `<@${member.id}> has been invited by <@${inviterId}>, who now has **${total}** invite${total !== 1 ? 's' : ''}.`,
+    });
+});
+
+// ─── Invite Tracking — guildMemberRemove ────────────────────────────────────
+
+client.on('guildMemberRemove', async member => {
+    const guild = member.guild;
+    const invData = loadInvites();
+    if (!invData[guild.id]) return;
+
+    const inviterId = (invData[guild.id].inviterMap || {})[member.id];
+    if (!inviterId) return;
+
+    if (!invData[guild.id].users) invData[guild.id].users = {};
+    if (!invData[guild.id].users[inviterId]) invData[guild.id].users[inviterId] = { real: 0, left: 0, fake: 0, bonus: 0 };
+    invData[guild.id].users[inviterId].left = (invData[guild.id].users[inviterId].left || 0) + 1;
+    saveInvites(invData);
 });
 
 // ─── Prefix commands (! prefix — mirrors most slash commands) ─────────────────
