@@ -3686,7 +3686,7 @@ client.on('interactionCreate', async interaction => {
 
         const embed = buildTypeConfigEmbed(newType);
         const components = buildTypeConfigComponents(newType.id);
-        await interaction.update({ embeds: [embed], components });
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
         return;
     }
 
@@ -3701,7 +3701,7 @@ client.on('interactionCreate', async interaction => {
         saveTicketConfig(interaction.guild.id, tConf);
         const embed = buildTypeConfigEmbed(type);
         const components = buildTypeConfigComponents(typeId);
-        await interaction.update({ embeds: [embed], components });
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
         return;
     }
 
@@ -3716,7 +3716,7 @@ client.on('interactionCreate', async interaction => {
         saveTicketConfig(interaction.guild.id, tConf);
         const embed = buildTypeConfigEmbed(type);
         const components = buildTypeConfigComponents(typeId);
-        await interaction.update({ embeds: [embed], components });
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
         return;
     }
 
@@ -3737,7 +3737,7 @@ client.on('interactionCreate', async interaction => {
         saveTicketConfig(interaction.guild.id, tConf);
         const embed = buildTypeConfigEmbed(type);
         const components = buildTypeConfigComponents(typeId);
-        await interaction.update({ embeds: [embed], components });
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
         return;
     }
 
@@ -3753,7 +3753,7 @@ client.on('interactionCreate', async interaction => {
         saveTicketConfig(interaction.guild.id, tConf);
         const embed = buildTypeConfigEmbed(type);
         const components = buildTypeConfigComponents(typeId);
-        await interaction.update({ embeds: [embed], components });
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
         return;
     }
 
