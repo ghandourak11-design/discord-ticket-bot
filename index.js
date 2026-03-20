@@ -4304,6 +4304,9 @@ client.on('interactionCreate', async interaction => {
                 embedColor = parseInt(hexMatch[1], 16);
             } else if (colorNames[colorInput.toLowerCase()]) {
                 embedColor = colorNames[colorInput.toLowerCase()];
+            } else {
+                await interaction.reply({ content: `❌ Invalid color \`${colorInput}\`. Use a hex code (e.g. \`#FF0000\`) or a name: ${Object.keys(colorNames).join(', ')}`, ephemeral: true });
+                return;
             }
         }
 
@@ -4927,12 +4930,13 @@ client.on('messageCreate', async message => {
         }
         try {
             const deleted = await message.channel.bulkDelete(amount + 1, true);
+            const purgedCount = Math.max(0, deleted.size - 1);
             const confirmation = await message.channel.send({
                 embeds: [
                     new EmbedBuilder()
                         .setColor(0x57F287)
                         .setTitle('🗑️ Messages Purged')
-                        .setDescription(`Successfully deleted **${deleted.size - 1}** message(s).`)
+                        .setDescription(`Successfully deleted **${purgedCount}** message(s).`)
                         .setTimestamp(),
                 ],
             });
