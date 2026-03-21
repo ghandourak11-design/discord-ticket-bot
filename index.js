@@ -450,8 +450,8 @@ const commands = [
     new SlashCommandBuilder()
         .setName('vc')
         .setDescription('Send a vouch message to the ticket creator and assign the vc role (ticket channels only)')
-        .addIntegerOption(opt =>
-            opt.setName('timer').setDescription('Minutes before the ticket auto-closes (optional)').setRequired(false).setMinValue(1),
+        .addStringOption(opt =>
+            opt.setName('timer').setDescription('Time before ticket auto-closes (e.g. 1m, 30m, 1h, 1hr, 1d)').setRequired(false),
         ),
 
     new SlashCommandBuilder()
@@ -469,6 +469,30 @@ const commands = [
         .addRoleOption(opt =>
             opt.setName('role').setDescription('Role to assign').setRequired(true),
         ),
+
+    new SlashCommandBuilder()
+        .setName('legit')
+        .setDescription('Configure the legit react channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub =>
+            sub.setName('channel')
+                .setDescription('Set the channel where users react to confirm legitimacy')
+                .addChannelOption(opt =>
+                    opt.setName('channel').setDescription('The legit react channel').setRequired(true),
+                ),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('reviewlink')
+        .setDescription('Set the review link shown to users after vouching')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt.setName('url').setDescription('The review URL (e.g. Trustpilot link)').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('proof')
+        .setDescription('Send a proof message showing vouch channel, legit channel, and review link'),
 
     // ── Sticky message commands ────────────────────────────────────────────────
     new SlashCommandBuilder()
@@ -1926,6 +1950,48 @@ function buildTypeConfigComponents(typeId) {
 // In-memory map for pending vc timers: ticketChannelId -> { creatorId, guildId, timer }
 const vcTimers = new Map();
 
+// ─── Duration parser for /vc timer option ─────────────────────────────────────
+function parseVcDuration(str) {
+    if (!str) return null;
+    const match = str.trim().toLowerCase().match(/^(\d+)\s*(m|min|mins|h|hr|hrs|hour|hours|d|day|days)$/);
+    if (!match) return null;
+    const num = parseInt(match[1], 10);
+    const unit = match[2];
+    if (unit.startsWith('d')) return num * 24 * 60 * 60 * 1000;
+    if (unit.startsWith('h')) return num * 60 * 60 * 1000;
+    return num * 60 * 1000;
+}
+
+// ─── Vouch channel name auto-update interval ──────────────────────────────────
+let vouchNameInterval = null;
+
+async function updateVouchChannelName() {
+    try {
+        const config = loadConfig();
+        const vouchChannelId = config.vouchChannel;
+        if (!vouchChannelId) return;
+
+        for (const guild of client.guilds.cache.values()) {
+            const channel = await guild.channels.fetch(vouchChannelId).catch(() => null);
+            if (!channel) continue;
+            const count = await countChannelMessages(channel);
+            const newName = `vouches│${count}`;
+            if (channel.name !== newName) {
+                await channel.setName(newName).catch(err => console.error('Failed to update vouch channel name:', err));
+            }
+            break;
+        }
+    } catch (err) {
+        console.error('Error updating vouch channel name:', err);
+    }
+}
+
+function startVouchChannelNameInterval() {
+    if (vouchNameInterval) clearInterval(vouchNameInterval);
+    updateVouchChannelName();
+    vouchNameInterval = setInterval(updateVouchChannelName, 5 * 60 * 1000);
+}
+
 // ─── Discord client ───────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -1950,6 +2016,8 @@ client.once('ready', async () => {
     if (config.orderChannelId) {
         startOrderPolling();
     }
+    // Start vouch channel name auto-update interval
+    startVouchChannelNameInterval();
     // Reload active giveaway timers
     reloadGiveawayTimers();
     // Cache guild invites for invite tracking
@@ -2452,7 +2520,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '✅ Vouches',
-                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc [timer]` — Send vouch message to ticket creator & assign vc role\n`/vouchchannel channel:<#>` — Set the vouch channel\n`/vcrole role:<@>` — Set the role to give after vouching',
+                    value: '`/vouches` / `!vouches` — Show total vouch count\n`/vc [timer]` — Send vouch message (timer: `1m`, `1h`, `1d`)\n`/vouchchannel channel:<#>` — Set the vouch channel\n`/vcrole role:<@>` — Set the vc role\n`/legit channel:<#>` — Set the legit react channel\n`/reviewlink url:<url>` — Set the review link\n`/proof` — Show proof of legitimacy (vouches, legit, review)',
                     inline: false,
                 },
                 {
@@ -2498,6 +2566,11 @@ client.on('interactionCreate', async interaction => {
                 {
                     name: '🤖 Bot Control',
                     value: '`/sync` — Re-sync slash commands\n`/setup-verify` — Post verification button\n`/help` / `!help` — Show this command list',
+                    inline: false,
+                },
+                {
+                    name: '🧮 Calculator',
+                    value: '`!calc <expression>` — Calculate math (supports `+`, `-`, `x`, `/`, `^`, parentheses)',
                     inline: false,
                 },
                 {
@@ -4236,20 +4309,31 @@ client.on('interactionCreate', async interaction => {
         const openTickets = getOpenTickets(interaction.guild.id);
         const ticket = openTickets[interaction.channel.id];
         if (!ticket) {
-            await interaction.reply({ content: '❌ This command can only be used inside a ticket channel.', ephemeral: true });
+            await interaction.reply({ content: '❌ This command can only be used inside a ticket channel.' });
             return;
         }
 
         const config = loadConfig();
         const vouchChannelId = config.vouchChannel;
         if (!vouchChannelId) {
-            await interaction.reply({ content: '❌ No vouch channel set. Use `/vouchchannel` first.', ephemeral: true });
+            await interaction.reply({ content: '❌ No vouch channel set. Use `/vouchchannel` first.' });
             return;
         }
 
         const creatorId = ticket.userId;
         const guildId = interaction.guild.id;
         const channelId = interaction.channel.id;
+
+        // Validate timer string if provided
+        const timerStr = interaction.options.getString('timer');
+        let timerMs = null;
+        if (timerStr) {
+            timerMs = parseVcDuration(timerStr);
+            if (timerMs === null) {
+                await interaction.reply({ content: '❌ Invalid timer format. Use formats like `1m`, `30m`, `1h`, `1hr`, `1d`.' });
+                return;
+            }
+        }
 
         // Immediately assign vc role to ticket creator
         const vcRoleId = config.vcRole;
@@ -4267,11 +4351,29 @@ client.on('interactionCreate', async interaction => {
             content: `<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`,
         });
 
-        // Optional timer to auto-close the ticket
-        const timerMinutes = interaction.options.getInteger('timer');
-        if (timerMinutes) {
-            const timerMs = timerMinutes * 60 * 1000;
+        // Legit react follow-up message
+        if (config.legitChannel) {
+            await interaction.channel.send({
+                content: `<@${creatorId}> please also react to the message in <#${config.legitChannel}> to confirm your legitimacy! ✅`,
+            });
+        }
 
+        // Review link follow-up message with embed and button
+        if (config.reviewLink) {
+            const reviewEmbed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setDescription("We'd love your feedback! Click the button below to leave us a review. ⭐");
+            const reviewRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setLabel('📝 Leave a Review')
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(config.reviewLink),
+            );
+            await interaction.channel.send({ embeds: [reviewEmbed], components: [reviewRow] });
+        }
+
+        // Optional timer to auto-close the ticket
+        if (timerMs) {
             if (vcTimers.has(channelId)) {
                 clearTimeout(vcTimers.get(channelId).timer);
             }
@@ -4319,6 +4421,73 @@ client.on('interactionCreate', async interaction => {
             embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ VC Role Set').setDescription(`<@&${role.id}> will be assigned to the ticket creator after the vouch flow.`)],
             ephemeral: true,
         });
+        return;
+    }
+
+    // ── /legit ───────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'legit' && interaction.options.getSubcommand() === 'channel') {
+        const channel = interaction.options.getChannel('channel');
+        const config = loadConfig();
+        config.legitChannel = channel.id;
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Legit React Channel Set').setDescription(`Users will be asked to react in <#${channel.id}> to confirm legitimacy.`)],
+        });
+        return;
+    }
+
+    // ── /reviewlink ──────────────────────────────────────────────────────────
+    if (interaction.commandName === 'reviewlink') {
+        const url = interaction.options.getString('url');
+        const config = loadConfig();
+        config.reviewLink = url;
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Review Link Set').setDescription(`Users will be directed to leave a review at: ${url}`)],
+        });
+        return;
+    }
+
+    // ── /proof ───────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'proof') {
+        const config = loadConfig();
+        const fields = [];
+
+        if (config.vouchChannel) {
+            fields.push({ name: '📋 Vouches', value: `<#${config.vouchChannel}>`, inline: true });
+        }
+        if (config.legitChannel) {
+            fields.push({ name: '✅ Legit Reacts', value: `<#${config.legitChannel}>`, inline: true });
+        }
+        if (config.reviewLink) {
+            fields.push({ name: '⭐ Reviews', value: `[Leave a Review](${config.reviewLink})`, inline: true });
+        }
+
+        if (fields.length === 0) {
+            await interaction.reply({ content: '❌ No proof channels or review link configured yet.' });
+            return;
+        }
+
+        const proofEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🔒 Proof & Legitimacy')
+            .setDescription('Here is our proof of legitimacy. Check our vouches, legit reacts, and reviews!')
+            .addFields(...fields)
+            .setTimestamp();
+
+        const components = [];
+        if (config.reviewLink) {
+            components.push(
+                new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setLabel('📝 Leave a Review')
+                        .setStyle(ButtonStyle.Link)
+                        .setURL(config.reviewLink),
+                ),
+            );
+        }
+
+        await interaction.reply({ embeds: [proofEmbed], components });
         return;
     }
 
@@ -4780,7 +4949,7 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '✅ Vouches',
-                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc [timer]` — Send vouch message to ticket creator & assign vc role\n`/vouchchannel channel` — Set the vouch channel\n`/vcrole role` — Set the role to give after vouching',
+                    value: '`/vouches` / `!vouches` — Show total vouch count\n`/vc [timer]` — Send vouch message (timer: `1m`, `1h`, `1d`)\n`/vouchchannel channel` — Set the vouch channel\n`/vcrole role` — Set the vc role\n`/legit channel` — Set the legit react channel\n`/reviewlink url` — Set the review link\n`/proof` — Show proof of legitimacy (vouches, legit, review)',
                     inline: false,
                 },
                 {
@@ -4829,6 +4998,11 @@ client.on('messageCreate', async message => {
                     inline: false,
                 },
                 {
+                    name: '🧮 Calculator',
+                    value: '`!calc <expression>` — Calculate math (supports `+`, `-`, `x`, `/`, `^`, parentheses)',
+                    inline: false,
+                },
+                {
                     name: '🔒 Owner Only',
                     value: '`?auth` — Show authorized user count\n`?pull <server_id>` — Pull authorized users to a server',
                     inline: false,
@@ -4861,6 +5035,39 @@ client.on('messageCreate', async message => {
             .setDescription(`Total vouches: **${count}**\nChannel: <#${vouchChannelId}>`)
             .setTimestamp();
         await message.reply({ embeds: [vouchEmbed] });
+        return;
+    }
+
+    // ── !calc ─────────────────────────────────────────────────────────────────
+    if (cmd === 'calc') {
+        const expr = args.join(' ');
+        if (!expr) {
+            await message.reply('❌ Usage: `!calc <expression>`\nExample: `!calc 2 + 3 x 4`');
+            return;
+        }
+        let sanitized = expr.replace(/x/gi, '*').replace(/\^/g, '**');
+        if (!/^[\d\s\+\-\*\/\.\(\)]+$/.test(sanitized)) {
+            await message.reply('❌ Invalid expression. Only numbers, `+`, `-`, `x`, `/`, `^`, and `()` are allowed.');
+            return;
+        }
+        try {
+            const result = new Function('return ' + sanitized)();
+            if (typeof result !== 'number' || !isFinite(result)) {
+                await message.reply('❌ Could not calculate. Check your expression.');
+                return;
+            }
+            const calcEmbed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setTitle('🧮 Calculator')
+                .addFields(
+                    { name: 'Expression', value: `\`${expr}\``, inline: true },
+                    { name: 'Result', value: `\`${result}\``, inline: true },
+                )
+                .setTimestamp();
+            await message.reply({ embeds: [calcEmbed] });
+        } catch {
+            await message.reply('❌ Invalid expression. Check your syntax.');
+        }
         return;
     }
 
