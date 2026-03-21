@@ -13,6 +13,8 @@ const {
     ButtonStyle,
     StringSelectMenuBuilder,
     StringSelectMenuOptionBuilder,
+    ChannelSelectMenuBuilder,
+    RoleSelectMenuBuilder,
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
@@ -54,41 +56,8 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('settings')
-        .setDescription('Configure bot settings')
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-        .addSubcommand(sub =>
-            sub
-                .setName('channel')
-                .setDescription('Set the channel for restock notifications')
-                .addChannelOption(opt =>
-                    opt
-                        .setName('channel')
-                        .setDescription('The channel to send restock notifications in')
-                        .setRequired(true),
-                ),
-        )
-        .addSubcommand(sub =>
-            sub
-                .setName('role')
-                .setDescription('Set the role to ping on restock notifications')
-                .addRoleOption(opt =>
-                    opt
-                        .setName('role')
-                        .setDescription('The role to mention in restock notifications')
-                        .setRequired(true),
-                ),
-        )
-        .addSubcommand(sub =>
-            sub
-                .setName('leader-channel')
-                .setDescription('Set a channel for the auto-updating leaderboard')
-                .addChannelOption(opt =>
-                    opt
-                        .setName('channel')
-                        .setDescription('The channel to post the live leaderboard in')
-                        .setRequired(true),
-                ),
-        ),
+        .setDescription('View and configure all bot settings in one dashboard')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
     new SlashCommandBuilder()
         .setName('restock')
@@ -1973,6 +1942,62 @@ function buildTypeConfigComponents(typeId) {
     return [row1, row2];
 }
 
+// ─── Settings dashboard helpers ───────────────────────────────────────────────
+
+const SETTINGS_DEFS = [
+    { key: 'notificationChannelId', label: '📣 Restock Channel', type: 'channel', description: 'Channel for restock notifications' },
+    { key: 'notificationRoleId', label: '🔔 Restock Ping Role', type: 'role', description: 'Role to ping for restocks' },
+    { key: 'leaderboardChannelId', label: '🏆 Leaderboard Channel', type: 'channel', description: 'Auto-updating leaderboard channel' },
+    { key: 'orderChannelId', label: '🛒 Order Channel', type: 'channel', description: 'New order notifications channel' },
+    { key: 'paidChannelId', label: '✅ Delivered Orders Channel', type: 'channel', description: 'Delivered orders channel' },
+    { key: 'reviewChannelId', label: '🔍 Review Queue Channel', type: 'channel', description: 'Orders needing review channel' },
+    { key: 'timezoneChannelId', label: '🕐 Staff Timezone Channel', type: 'channel', description: 'Live staff times channel' },
+    { key: 'vouchChannel', label: '📋 Vouch Channel', type: 'channel', description: 'Vouch requests channel' },
+    { key: 'vcRole', label: '🏅 VC Role', type: 'role', description: 'Role assigned after vouch flow' },
+    { key: 'legitChannel', label: '✔️ Legit React Channel', type: 'channel', description: 'Legit confirmation reacts channel' },
+    { key: 'reviewLink', label: '⭐ Review Link', type: 'url', description: 'External review link (e.g. Trustpilot)' },
+    { key: '__inviteChannel', label: '📨 Invite Notification Channel', type: 'channel', description: 'Invite join messages channel' },
+];
+
+function buildSettingsDashboardEmbed(guildId) {
+    const config = loadConfig();
+    const invData = loadInvites();
+    const fields = SETTINGS_DEFS.map(def => {
+        let val;
+        if (def.key === '__inviteChannel') {
+            const gd = invData[guildId] || {};
+            val = gd.inviteChannel ? `<#${gd.inviteChannel}>` : '*Not set*';
+        } else if (def.type === 'channel') {
+            val = config[def.key] ? `<#${config[def.key]}>` : '*Not set*';
+        } else if (def.type === 'role') {
+            val = config[def.key] ? `<@&${config[def.key]}>` : '*Not set*';
+        } else {
+            val = config[def.key] ? config[def.key] : '*Not set*';
+        }
+        return { name: def.label, value: val, inline: true };
+    });
+    return new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('⚙️ Bot Settings Dashboard')
+        .setDescription('Select a setting from the dropdown below to edit it. Changes take effect immediately.')
+        .addFields(fields)
+        .setFooter({ text: 'Tip: Use /ticket panel to configure the ticket system.' });
+}
+
+function buildSettingsDashboardComponents() {
+    const options = SETTINGS_DEFS.map(def =>
+        new StringSelectMenuOptionBuilder()
+            .setLabel(def.label)
+            .setValue(def.key)
+            .setDescription(def.description),
+    );
+    const select = new StringSelectMenuBuilder()
+        .setCustomId('settings_main_select')
+        .setPlaceholder('Choose a setting to edit…')
+        .addOptions(options);
+    return [new ActionRowBuilder().addComponents(select)];
+}
+
 // In-memory map for pending vc timers: ticketChannelId -> { creatorId, guildId, timer }
 const vcTimers = new Map();
 
@@ -2520,7 +2545,7 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
-    if (!(interaction.isChatInputCommand() || interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit())) return;
+    if (!(interaction.isChatInputCommand() || interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit() || interaction.isChannelSelectMenu() || interaction.isRoleSelectMenu())) return;
 
     // /help
     if (interaction.commandName === 'help') {
@@ -2556,7 +2581,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '📊 Stats & Loyalty',
-                    value: '`/stats view user:<@>` — View loyalty profile & order history\n`/stats private` — Make your stats private\n`/stats public` — Make your stats public\n`/claim minecraft_username:<name> amount:<$>` — Link Discord to purchase history\n`/leader` — Top 10 spenders leaderboard\n`/settings leader-channel channel:<#>` — Set auto-updating leaderboard channel',
+                    value: '`/stats view user:<@>` — View loyalty profile & order history\n`/stats private` — Make your stats private\n`/stats public` — Make your stats public\n`/claim minecraft_username:<name> amount:<$>` — Link Discord to purchase history\n`/leader` — Top 10 spenders leaderboard',
                     inline: false,
                 },
                 {
@@ -2566,7 +2591,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '⚙️ Settings',
-                    value: '`/settings channel channel:<#>` — Set restock notification channel\n`/settings role role:<@>` — Set role to ping for restocks\n`/order channel channel:<#>` — Set order notification channel\n`/paid channel channel:<#>` — Set delivered orders channel\n`/review channel channel:<#>` — Set review orders channel',
+                    value: '`/settings` — Open the unified settings dashboard (channels, roles, links, and more)\n`/ticket panel` — Configure the ticket panel (types, categories, questions, roles)',
                     inline: false,
                 },
                 {
@@ -2610,85 +2635,159 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
             )
-            .setFooter({ text: 'Use /settings channel before running /restock.' })
+            .setFooter({ text: 'Use /settings to configure channels before running /restock.' })
             .setTimestamp();
 
         await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
         return;
     }
 
-    // /settings channel
-    if (
-        interaction.commandName === 'settings' &&
-        interaction.options.getSubcommand() === 'channel'
-    ) {
-        const channel = interaction.options.getChannel('channel');
-        const config = loadConfig();
-        config.notificationChannelId = channel.id;
-        saveConfig(config);
+    // /settings — main dashboard
+    if (interaction.commandName === 'settings') {
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
+        return;
+    }
 
+    // ── Select: Settings main select ──────────────────────────────────────────
+    if (interaction.isStringSelectMenu() && interaction.customId === 'settings_main_select') {
+        const key = interaction.values[0];
+        const def = SETTINGS_DEFS.find(d => d.key === key);
+        if (!def) { await interaction.reply({ content: '❌ Unknown setting.', ephemeral: true }); return; }
+
+        if (def.type === 'channel') {
+            const chSelect = new ChannelSelectMenuBuilder()
+                .setCustomId(`settings_ch_select:${key}`)
+                .setPlaceholder(`Select a channel for ${def.label}…`);
+            const backBtn = new ButtonBuilder()
+                .setCustomId('settings_back')
+                .setLabel('← Back to Settings')
+                .setStyle(ButtonStyle.Secondary);
+            await interaction.update({
+                content: `**Editing: ${def.label}**\n${def.description}`,
+                embeds: [],
+                components: [
+                    new ActionRowBuilder().addComponents(chSelect),
+                    new ActionRowBuilder().addComponents(backBtn),
+                ],
+            });
+        } else if (def.type === 'role') {
+            const roleSelect = new RoleSelectMenuBuilder()
+                .setCustomId(`settings_role_select:${key}`)
+                .setPlaceholder(`Select a role for ${def.label}…`);
+            const backBtn = new ButtonBuilder()
+                .setCustomId('settings_back')
+                .setLabel('← Back to Settings')
+                .setStyle(ButtonStyle.Secondary);
+            await interaction.update({
+                content: `**Editing: ${def.label}**\n${def.description}`,
+                embeds: [],
+                components: [
+                    new ActionRowBuilder().addComponents(roleSelect),
+                    new ActionRowBuilder().addComponents(backBtn),
+                ],
+            });
+        } else {
+            // URL type — show modal
+            const config = loadConfig();
+            const currentVal = config[key] || '';
+            const modal = new ModalBuilder()
+                .setCustomId(`settings_modal:${key}`)
+                .setTitle(`Edit: ${def.label}`);
+            const input = new TextInputBuilder()
+                .setCustomId('value')
+                .setLabel(def.description)
+                .setStyle(TextInputStyle.Short)
+                .setRequired(false)
+                .setPlaceholder('Enter a URL (leave blank to clear)')
+                .setValue(currentVal);
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+            await interaction.showModal(modal);
+        }
+        return;
+    }
+
+    // ── Channel select: Settings ───────────────────────────────────────────────
+    if (interaction.isChannelSelectMenu() && interaction.customId.startsWith('settings_ch_select:')) {
+        const key = interaction.customId.slice('settings_ch_select:'.length);
+        const def = SETTINGS_DEFS.find(d => d.key === key);
+        const channelId = interaction.values[0];
+
+        if (key === '__inviteChannel') {
+            const invData = loadInvites();
+            if (!invData[interaction.guild.id]) invData[interaction.guild.id] = { users: {} };
+            invData[interaction.guild.id].inviteChannel = channelId;
+            saveInvites(invData);
+        } else {
+            const config = loadConfig();
+            config[key] = channelId;
+            if (key === 'leaderboardChannelId') config.leaderboardMessageId = null;
+            if (key === 'timezoneChannelId') delete config.timezoneMessageId;
+            saveConfig(config);
+            if (key === 'leaderboardChannelId') startLeaderboardInterval();
+            if (key === 'timezoneChannelId') startTimezoneInterval();
+            if (key === 'orderChannelId') await startOrderPolling();
+        }
+
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
+        await interaction.update({
+            content: `✅ **${def ? def.label : key}** updated to <#${channelId}>.`,
+            embeds: [embed],
+            components,
+        });
+        return;
+    }
+
+    // ── Role select: Settings ──────────────────────────────────────────────────
+    if (interaction.isRoleSelectMenu() && interaction.customId.startsWith('settings_role_select:')) {
+        const key = interaction.customId.slice('settings_role_select:'.length);
+        const def = SETTINGS_DEFS.find(d => d.key === key);
+        const roleId = interaction.values[0];
+        const config = loadConfig();
+        config[key] = roleId;
+        saveConfig(config);
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
+        await interaction.update({
+            content: `✅ **${def ? def.label : key}** updated to <@&${roleId}>.`,
+            embeds: [embed],
+            components,
+        });
+        return;
+    }
+
+    // ── Modal: Settings URL value ──────────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('settings_modal:')) {
+        const key = interaction.customId.slice('settings_modal:'.length);
+        const def = SETTINGS_DEFS.find(d => d.key === key);
+        const value = interaction.fields.getTextInputValue('value').trim();
+        const config = loadConfig();
+        if (value) {
+            config[key] = value;
+        } else {
+            delete config[key];
+        }
+        saveConfig(config);
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
         await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Settings Updated')
-                    .setDescription(
-                        `Restock notifications will now be sent to <#${channel.id}>.`,
-                    ),
-            ],
+            content: value
+                ? `✅ **${def ? def.label : key}** updated.`
+                : `🗑️ **${def ? def.label : key}** cleared.`,
+            embeds: [embed],
+            components,
             ephemeral: true,
         });
         return;
     }
 
-    // /settings role
-    if (
-        interaction.commandName === 'settings' &&
-        interaction.options.getSubcommand() === 'role'
-    ) {
-        const role = interaction.options.getRole('role');
-        const config = loadConfig();
-        config.notificationRoleId = role.id;
-        saveConfig(config);
-
-        await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Settings Updated')
-                    .setDescription(
-                        `<@&${role.id}> will now be pinged on restock notifications.`,
-                    ),
-            ],
-            ephemeral: true,
-        });
-        return;
-    }
-
-    // /settings leader-channel
-    if (
-        interaction.commandName === 'settings' &&
-        interaction.options.getSubcommand() === 'leader-channel'
-    ) {
-        const channel = interaction.options.getChannel('channel');
-        const config = loadConfig();
-        config.leaderboardChannelId = channel.id;
-        config.leaderboardMessageId = null;
-        saveConfig(config);
-
-        startLeaderboardInterval();
-
-        await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Leaderboard Channel Set')
-                    .setDescription(
-                        `The auto-updating leaderboard will be posted in <#${channel.id}> and refreshed every 10 minutes.`,
-                    ),
-            ],
-            ephemeral: true,
-        });
+    // ── Button: Settings back ──────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'settings_back') {
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
+        await interaction.update({ content: null, embeds: [embed], components });
         return;
     }
 
@@ -2704,7 +2803,7 @@ client.on('interactionCreate', async interaction => {
                         .setColor(0xED4245)
                         .setTitle('❌ No Notification Channel Set')
                         .setDescription(
-                            'Please run `/settings channel` first to configure the notification channel.',
+                            'Please run `/settings` first to configure the notification channel.',
                         ),
                 ],
                 ephemeral: true,
@@ -2723,7 +2822,7 @@ client.on('interactionCreate', async interaction => {
                         .setColor(0xED4245)
                         .setTitle('❌ Channel Not Found')
                         .setDescription(
-                            'The configured notification channel could not be found. Please run `/settings channel` again.',
+                            'The configured notification channel could not be found. Please run `/settings` again.',
                         ),
                 ],
                 ephemeral: true,
@@ -3765,10 +3864,22 @@ client.on('interactionCreate', async interaction => {
     // ── Button: Ticket config — set category ─────────────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_category:')) {
         const typeId = interaction.customId.slice('tp_cfg_category:'.length);
-        const modal = new ModalBuilder().setCustomId(`tp_modal_category:${typeId}`).setTitle('Set Ticket Category');
-        const input = new TextInputBuilder().setCustomId('category_id').setLabel('Category Channel ID').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click category → Copy ID');
-        modal.addComponents(new ActionRowBuilder().addComponents(input));
-        await interaction.showModal(modal);
+        const chSelect = new ChannelSelectMenuBuilder()
+            .setCustomId(`tp_category_select:${typeId}`)
+            .setPlaceholder('Select a category channel…')
+            .addChannelTypes(ChannelType.GuildCategory);
+        const backBtn = new ButtonBuilder()
+            .setCustomId(`tp_cfg_back_to_type:${typeId}`)
+            .setLabel('← Back')
+            .setStyle(ButtonStyle.Secondary);
+        await interaction.update({
+            content: '🗂️ Select the category where tickets of this type will be created:',
+            embeds: [],
+            components: [
+                new ActionRowBuilder().addComponents(chSelect),
+                new ActionRowBuilder().addComponents(backBtn),
+            ],
+        });
         return;
     }
 
@@ -3796,19 +3907,23 @@ client.on('interactionCreate', async interaction => {
     // ── Button: Ticket config — set viewable roles ───────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_roles:')) {
         const typeId = interaction.customId.slice('tp_cfg_roles:'.length);
-        const tConf = getTicketConfig(interaction.guild.id);
-        const type = tConf.types.find(t => t.id === typeId);
-        const existing = type ? type.viewableRoles.join(', ') : '';
-        const modal = new ModalBuilder().setCustomId(`tp_modal_roles:${typeId}`).setTitle('Set Viewable Roles');
-        const input = new TextInputBuilder()
-            .setCustomId('role_ids')
-            .setLabel('Role IDs (comma-separated)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(false)
-            .setPlaceholder('123456789, 987654321')
-            .setValue(existing);
-        modal.addComponents(new ActionRowBuilder().addComponents(input));
-        await interaction.showModal(modal);
+        const roleSelect = new RoleSelectMenuBuilder()
+            .setCustomId(`tp_roles_select:${typeId}`)
+            .setPlaceholder('Select roles that can view this ticket type…')
+            .setMinValues(0)
+            .setMaxValues(10);
+        const backBtn = new ButtonBuilder()
+            .setCustomId(`tp_cfg_back_to_type:${typeId}`)
+            .setLabel('← Back')
+            .setStyle(ButtonStyle.Secondary);
+        await interaction.update({
+            content: '👁️ Select the roles that can see tickets of this type (select up to 10):',
+            embeds: [],
+            components: [
+                new ActionRowBuilder().addComponents(roleSelect),
+                new ActionRowBuilder().addComponents(backBtn),
+            ],
+        });
         return;
     }
 
@@ -3951,19 +4066,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     // ── Modal: Set ticket category ───────────────────────────────────────────
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_category:')) {
-        const typeId = interaction.customId.slice('tp_modal_category:'.length);
-        const catId = interaction.fields.getTextInputValue('category_id').trim();
-        const tConf = getTicketConfig(interaction.guild.id);
-        const type = tConf.types.find(t => t.id === typeId);
-        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
-        type.categoryId = catId;
-        saveTicketConfig(interaction.guild.id, tConf);
-        const embed = buildTypeConfigEmbed(type);
-        const components = buildTypeConfigComponents(typeId);
-        await interaction.reply({ embeds: [embed], components, ephemeral: true });
-        return;
-    }
+    // (replaced by channel select — tp_category_select handler below)
 
     // ── Modal: Set ticket questions ──────────────────────────────────────────
     if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_questions:')) {
@@ -3987,20 +4090,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     // ── Modal: Set ticket viewable roles ────────────────────────────────────
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_roles:')) {
-        const typeId = interaction.customId.slice('tp_modal_roles:'.length);
-        const tConf = getTicketConfig(interaction.guild.id);
-        const type = tConf.types.find(t => t.id === typeId);
-        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
-        const raw = interaction.fields.getTextInputValue('role_ids');
-        const roleIds = raw.split(',').map(r => r.trim()).filter(r => /^\d+$/.test(r));
-        type.viewableRoles = roleIds;
-        saveTicketConfig(interaction.guild.id, tConf);
-        const embed = buildTypeConfigEmbed(type);
-        const components = buildTypeConfigComponents(typeId);
-        await interaction.reply({ embeds: [embed], components, ephemeral: true });
-        return;
-    }
+    // (replaced by role select — tp_roles_select handler below)
 
     // ── Modal: Edit panel text ───────────────────────────────────────────────
     if (interaction.isModalSubmit() && interaction.customId === 'tp_modal_panel_text') {
@@ -4013,6 +4103,48 @@ client.on('interactionCreate', async interaction => {
         const embed = buildTicketPanelSettingsEmbed(interaction.guild.id);
         const components = buildTicketSettingsComponents(interaction.guild.id);
         await interaction.reply({ embeds: [embed], components, ephemeral: true });
+        return;
+    }
+
+    // ── Channel select: Ticket category ──────────────────────────────────────
+    if (interaction.isChannelSelectMenu() && interaction.customId.startsWith('tp_category_select:')) {
+        const typeId = interaction.customId.slice('tp_category_select:'.length);
+        const channelId = interaction.values[0];
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        type.categoryId = channelId;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ content: null, embeds: [embed], components });
+        return;
+    }
+
+    // ── Role select: Ticket viewable roles ────────────────────────────────────
+    if (interaction.isRoleSelectMenu() && interaction.customId.startsWith('tp_roles_select:')) {
+        const typeId = interaction.customId.slice('tp_roles_select:'.length);
+        const roleIds = interaction.values;
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        type.viewableRoles = roleIds;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ content: null, embeds: [embed], components });
+        return;
+    }
+
+    // ── Button: Ticket config — back to type view ─────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_back_to_type:')) {
+        const typeId = interaction.customId.slice('tp_cfg_back_to_type:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ content: null, embeds: [embed], components });
         return;
     }
 
@@ -5103,7 +5235,7 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '📊 Stats & Loyalty',
-                    value: '`/stats view user` / `!stats @user` — View loyalty profile & order history\n`/stats private` / `!stats private` — Make your stats private\n`/stats public` / `!stats public` — Make your stats public\n`/claim minecraft_username amount` — Link Discord to purchase history\n`/leader` / `!leader` — Top 10 spenders leaderboard\n`/settings leader-channel channel` — Set auto-updating leaderboard channel',
+                    value: '`/stats view user` / `!stats @user` — View loyalty profile & order history\n`/stats private` / `!stats private` — Make your stats private\n`/stats public` / `!stats public` — Make your stats public\n`/claim minecraft_username amount` — Link Discord to purchase history\n`/leader` / `!leader` — Top 10 spenders leaderboard',
                     inline: false,
                 },
                 {
@@ -5113,7 +5245,7 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '⚙️ Settings',
-                    value: '`/settings channel channel` — Set restock notification channel\n`/settings role role` — Set role to ping for restocks\n`/order channel channel` — Set order notification channel\n`/paid channel channel` — Set delivered orders channel\n`/review channel channel` — Set review orders channel',
+                    value: '`/settings` — Open the unified settings dashboard (channels, roles, links, and more)\n`/ticket panel` — Configure the ticket panel (types, categories, questions, roles)',
                     inline: false,
                 },
                 {
@@ -5157,7 +5289,7 @@ client.on('messageCreate', async message => {
                     inline: false,
                 },
             )
-            .setFooter({ text: 'Use !settings channel before running !restock.' })
+            .setFooter({ text: 'Use /settings to configure channels before running /restock.' })
             .setTimestamp();
 
         await message.reply({ embeds: [helpEmbed] });
@@ -5735,7 +5867,7 @@ client.on('messageCreate', async message => {
                     new EmbedBuilder()
                         .setColor(0xED4245)
                         .setTitle('❌ No Notification Channel Set')
-                        .setDescription('Please run `!settings channel #channel` first to configure the notification channel.'),
+                        .setDescription('Please run `/settings` first to configure the notification channel.'),
                 ],
             });
             return;
@@ -5748,7 +5880,7 @@ client.on('messageCreate', async message => {
                     new EmbedBuilder()
                         .setColor(0xED4245)
                         .setTitle('❌ Channel Not Found')
-                        .setDescription('The configured notification channel could not be found. Please run `!settings channel` again.'),
+                        .setDescription('The configured notification channel could not be found. Please run `/settings` again.'),
                 ],
             });
             return;
