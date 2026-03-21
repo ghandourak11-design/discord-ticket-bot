@@ -494,6 +494,32 @@ const commands = [
         .setName('proof')
         .setDescription('Send a proof message showing vouch channel, legit channel, and review link'),
 
+    // ── Automod commands ───────────────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('automod')
+        .setDescription('Manage automod settings')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub =>
+            sub.setName('setup')
+                .setDescription('Create the Automod Bypass role and enable link/word filtering'),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('banword')
+        .setDescription('Add a word to the banned words list')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt.setName('word').setDescription('The word to ban').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('unbanword')
+        .setDescription('Remove a word from the banned words list')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt.setName('word').setDescription('The word to unban').setRequired(true),
+        ),
+
     // ── Sticky message commands ────────────────────────────────────────────────
     new SlashCommandBuilder()
         .setName('stick')
@@ -2559,6 +2585,11 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
+                    name: '🤖 Automod',
+                    value: '`/automod setup` — Create the Automod Bypass role and enable filtering\n`/banword word` — Add a banned word\n`/unbanword word` — Remove a banned word',
+                    inline: false,
+                },
+                {
                     name: '📨 Embed Builder',
                     value: '`/embed title [description] [color] [footer] [image] [thumbnail] [author] [url]` — Send a custom embed',
                     inline: false,
@@ -4491,6 +4522,85 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // ── /automod setup ───────────────────────────────────────────────────────
+    if (interaction.commandName === 'automod' && interaction.options.getSubcommand() === 'setup') {
+        const config = loadConfig();
+
+        // Check if role already exists and is still valid
+        if (config.automodRoleId) {
+            const existing = interaction.guild.roles.cache.get(config.automodRoleId)
+                || await interaction.guild.roles.fetch(config.automodRoleId).catch(() => null);
+            if (existing) {
+                await interaction.reply({
+                    embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ Automod Already Set Up').setDescription(`The Automod Bypass role already exists: <@&${existing.id}>\nMembers with this role can send links and any configured banned words.`)],
+                });
+                return;
+            }
+        }
+
+        // Create the bypass role
+        let bypassRole;
+        try {
+            bypassRole = await interaction.guild.roles.create({
+                name: 'Automod Bypass',
+                color: 0x99AAB5,
+                reason: 'Created by bot automod setup',
+            });
+        } catch (err) {
+            console.error('Failed to create automod role:', err);
+            await interaction.reply({ content: '❌ Failed to create the Automod Bypass role. Make sure I have the **Manage Roles** permission.' });
+            return;
+        }
+
+        config.automodRoleId = bypassRole.id;
+        saveConfig(config);
+
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Automod Set Up')
+                    .setDescription(`Created the <@&${bypassRole.id}> role.\n\n**Link filtering** and **banned word filtering** are now active.\nMembers with the **Automod Bypass** role are exempt.\n\nUse \`/banword\` to add banned words.`),
+            ],
+        });
+        return;
+    }
+
+    // ── /banword ─────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'banword') {
+        const word = interaction.options.getString('word').toLowerCase().trim();
+        const config = loadConfig();
+        if (!config.bannedWords) config.bannedWords = [];
+        if (config.bannedWords.includes(word)) {
+            await interaction.reply({ content: `⚠️ \`${word}\` is already in the banned words list.` });
+            return;
+        }
+        config.bannedWords.push(word);
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Banned Word Added').setDescription(`\`${word}\` has been added to the banned words list.`)],
+        });
+        return;
+    }
+
+    // ── /unbanword ───────────────────────────────────────────────────────────
+    if (interaction.commandName === 'unbanword') {
+        const word = interaction.options.getString('word').toLowerCase().trim();
+        const config = loadConfig();
+        if (!config.bannedWords) config.bannedWords = [];
+        const idx = config.bannedWords.indexOf(word);
+        if (idx === -1) {
+            await interaction.reply({ content: `⚠️ \`${word}\` is not in the banned words list.` });
+            return;
+        }
+        config.bannedWords.splice(idx, 1);
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Banned Word Removed').setDescription(`\`${word}\` has been removed from the banned words list.`)],
+        });
+        return;
+    }
+
     // ── /stick ───────────────────────────────────────────────────────────────
     if (interaction.commandName === 'stick') {
         const message = interaction.options.getString('message');
@@ -4920,6 +5030,40 @@ const PREFIX = '!';
 
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
+    if (!message.guild) return;
+
+    // ── Automod ───────────────────────────────────────────────────────────────
+    const automodConfig = loadConfig();
+    const automodRoleId = automodConfig.automodRoleId;
+    if (automodRoleId) {
+        const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+        const hasAutomodBypass = member && member.roles.cache.has(automodRoleId);
+
+        if (!hasAutomodBypass) {
+            // Block links
+            const urlRegex = /https?:\/\/\S+|discord\.gg\/\S+|www\.\S+/i;
+            if (urlRegex.test(message.content)) {
+                await message.delete().catch(() => {});
+                const warn = await message.channel.send(`<@${message.author.id}> ❌ You are not allowed to send links.`).catch(() => null);
+                if (warn) setTimeout(() => warn.delete().catch(() => {}), 5000);
+                return;
+            }
+
+            // Block banned words
+            const bannedWords = automodConfig.bannedWords || [];
+            if (bannedWords.length > 0) {
+                const lowerContent = message.content.toLowerCase();
+                const foundWord = bannedWords.find(w => lowerContent.includes(w));
+                if (foundWord) {
+                    await message.delete().catch(() => {});
+                    const warn = await message.channel.send(`<@${message.author.id}> ❌ Your message contained a banned word.`).catch(() => null);
+                    if (warn) setTimeout(() => warn.delete().catch(() => {}), 5000);
+                    return;
+                }
+            }
+        }
+    }
+
     if (!message.content.startsWith(PREFIX)) return;
 
     const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
@@ -4985,6 +5129,11 @@ client.on('messageCreate', async message => {
                 {
                     name: '🛡️ Moderation',
                     value: '`!ban @user [reason]` — Ban a user 🔒 Requires **Ban Members**\n`!kick @user [reason]` — Kick a user 🔒 Requires **Kick Members**\n`!mute @user <duration> [reason]` — Timeout a user (e.g. `10m`, `1h`, `1d`) 🔒 Requires **Moderate Members**\n`!purge <1-100>` — Bulk delete messages 🔒 Requires **Manage Messages**',
+                    inline: false,
+                },
+                {
+                    name: '🤖 Automod',
+                    value: '`/automod setup` — Create the Automod Bypass role and enable filtering\n`/banword word` — Add a banned word\n`/unbanword word` — Remove a banned word',
                     inline: false,
                 },
                 {
