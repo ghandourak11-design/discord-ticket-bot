@@ -4684,14 +4684,19 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // Build a single consolidated reply with all /vc messages
-        const vcParts = [`<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`];
+        // Send vouch message pinging the ticket creator
+        await interaction.reply({
+            content: `<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`,
+        });
+
+        // Legit react follow-up message
         if (config.legitChannel) {
-            vcParts.push(`Please also react to the message in <#${config.legitChannel}> to confirm your legitimacy! ✅`);
+            await interaction.channel.send({
+                content: `<@${creatorId}> please also react to the message in <#${config.legitChannel}> to confirm your legitimacy! ✅`,
+            });
         }
 
-        const vcReplyPayload = { content: vcParts.join('\n') };
-
+        // Review link follow-up message with embed and button
         if (config.reviewLink) {
             const reviewEmbed = new EmbedBuilder()
                 .setColor(0x5865F2)
@@ -4702,11 +4707,8 @@ client.on('interactionCreate', async interaction => {
                     .setStyle(ButtonStyle.Link)
                     .setURL(config.reviewLink),
             );
-            vcReplyPayload.embeds = [reviewEmbed];
-            vcReplyPayload.components = [reviewRow];
+            await interaction.channel.send({ embeds: [reviewEmbed], components: [reviewRow] });
         }
-
-        await interaction.reply(vcReplyPayload);
 
         // Optional timer to auto-close the ticket
         if (timerMs) {
@@ -4925,7 +4927,9 @@ client.on('interactionCreate', async interaction => {
 
         const stickyEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
-            .setDescription(`📌 ${message}`);
+            .setDescription(showReview && config.reviewLink
+                ? `📌 ${message}\n\nWe'd love your feedback! Click the button below to leave us a review. ⭐`
+                : `📌 ${message}`);
         const stickyPayload = { embeds: [stickyEmbed] };
         if (showReview && config.reviewLink) {
             stickyPayload.components = [
@@ -5239,11 +5243,14 @@ client.on('messageCreate', async message => {
             } catch { /* already gone */ }
         }
         // Re-post at the bottom
+        const hasReview = sticky.showReview !== false && config.reviewLink;
         const stickyEmbed = new EmbedBuilder()
             .setColor(0x5865F2)
-            .setDescription(`📌 ${sticky.content}`);
+            .setDescription(hasReview
+                ? `📌 ${sticky.content}\n\nWe'd love your feedback! Click the button below to leave us a review. ⭐`
+                : `📌 ${sticky.content}`);
         const stickyPayload = { embeds: [stickyEmbed] };
-        if (sticky.showReview !== false && config.reviewLink) {
+        if (hasReview) {
             stickyPayload.components = [
                 new ActionRowBuilder().addComponents(
                     new ButtonBuilder()
