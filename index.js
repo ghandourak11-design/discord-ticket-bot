@@ -3279,17 +3279,15 @@ client.on('interactionCreate', async interaction => {
 
     // /claim
     if (interaction.commandName === 'claim') {
-        if (loadConfig().statsMaintenance) {
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
 
         const mcUsername = interaction.options.getString('minecraft_username');
         const providedAmount = interaction.options.getNumber('amount');
@@ -3427,6 +3425,16 @@ client.on('interactionCreate', async interaction => {
 
     // /stats
     if (interaction.commandName === 'stats') {
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
+
         const sub = interaction.options.getSubcommand();
 
         // /stats private
@@ -3456,18 +3464,6 @@ client.on('interactionCreate', async interaction => {
         }
 
         // /stats view
-        if (loadConfig().statsMaintenance) {
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
         const mentionedUser = interaction.options.getUser('user');
         const username = mentionedUser.username;
 
@@ -3595,17 +3591,15 @@ client.on('interactionCreate', async interaction => {
 
     // /leader
     if (interaction.commandName === 'leader') {
-        if (loadConfig().statsMaintenance) {
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
 
         await interaction.deferReply();
 
@@ -4690,14 +4684,19 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // Build a single consolidated reply with all /vc messages
-        const vcParts = [`<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`];
+        // Send vouch message pinging the ticket creator
+        await interaction.reply({
+            content: `<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`,
+        });
+
+        // Legit react follow-up message
         if (config.legitChannel) {
-            vcParts.push(`Please also react to the message in <#${config.legitChannel}> to confirm your legitimacy! ✅`);
+            await interaction.channel.send({
+                content: `<@${creatorId}> please also react to the message in <#${config.legitChannel}> to confirm your legitimacy! ✅`,
+            });
         }
 
-        const vcReplyPayload = { content: vcParts.join('\n') };
-
+        // Review link follow-up message with embed and button
         if (config.reviewLink) {
             const reviewEmbed = new EmbedBuilder()
                 .setColor(0x5865F2)
@@ -4708,11 +4707,8 @@ client.on('interactionCreate', async interaction => {
                     .setStyle(ButtonStyle.Link)
                     .setURL(config.reviewLink),
             );
-            vcReplyPayload.embeds = [reviewEmbed];
-            vcReplyPayload.components = [reviewRow];
+            await interaction.channel.send({ embeds: [reviewEmbed], components: [reviewRow] });
         }
-
-        await interaction.reply(vcReplyPayload);
 
         // Optional timer to auto-close the ticket
         if (timerMs) {
@@ -4929,7 +4925,12 @@ client.on('interactionCreate', async interaction => {
             } catch { /* already deleted */ }
         }
 
-        const stickyPayload = { content: `📌 ${message}` };
+        const stickyEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setDescription(showReview && config.reviewLink
+                ? `📌 ${message}\n\nWe'd love your feedback! Click the button below to leave us a review. ⭐`
+                : `📌 ${message}`);
+        const stickyPayload = { embeds: [stickyEmbed] };
         if (showReview && config.reviewLink) {
             stickyPayload.components = [
                 new ActionRowBuilder().addComponents(
@@ -5242,8 +5243,14 @@ client.on('messageCreate', async message => {
             } catch { /* already gone */ }
         }
         // Re-post at the bottom
-        const stickyPayload = { content: `📌 ${sticky.content}` };
-        if (sticky.showReview !== false && config.reviewLink) {
+        const hasReview = sticky.showReview !== false && config.reviewLink;
+        const stickyEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setDescription(hasReview
+                ? `📌 ${sticky.content}\n\nWe'd love your feedback! Click the button below to leave us a review. ⭐`
+                : `📌 ${sticky.content}`);
+        const stickyPayload = { embeds: [stickyEmbed] };
+        if (hasReview) {
             stickyPayload.components = [
                 new ActionRowBuilder().addComponents(
                     new ButtonBuilder()
@@ -5754,6 +5761,16 @@ client.on('messageCreate', async message => {
 
     // ── !stats ────────────────────────────────────────────────────────────────
     if (cmd === 'stats') {
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
+
         const sub = args[0] ? args[0].toLowerCase() : null;
 
         // !stats private
@@ -5777,18 +5794,6 @@ client.on('messageCreate', async message => {
         }
 
         // !stats @user  (or !stats view @user)
-        if (loadConfig().statsMaintenance) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
         let mentionedUser = message.mentions.users.first();
         if (!mentionedUser) {
             await message.reply('❌ Usage: `!stats @user`, `!stats private`, or `!stats public`');
@@ -5869,17 +5874,15 @@ client.on('messageCreate', async message => {
 
     // ── !leader ───────────────────────────────────────────────────────────────
     if (cmd === 'leader') {
-        if (loadConfig().statsMaintenance) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
 
         const cachedLeaderboard = leaderboardCache.get('leaderboard');
         if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
@@ -5923,17 +5926,15 @@ client.on('messageCreate', async message => {
 
     // ── !claim <minecraft_username> <amount> ──────────────────────────────────
     if (cmd === 'claim') {
-        if (loadConfig().statsMaintenance) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
 
         const mcUsername = args[0];
         const providedAmount = parseFloat(args[1]);
