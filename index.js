@@ -226,6 +226,11 @@ const commands = [
         .setDescription('Display the top 10 spenders leaderboard'),
 
     new SlashCommandBuilder()
+        .setName('maintenance')
+        .setDescription('Toggle maintenance mode for stats/leaderboard commands')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
         .setName('setup-verify')
         .setDescription('Post a verification button for users to authorize with the bot')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -1556,8 +1561,16 @@ function buildLeaderboardEmbed(customers) {
         .setTimestamp();
 }
 
+function buildMaintenanceEmbed() {
+    return new EmbedBuilder()
+        .setColor(0xFFA500)
+        .setTitle('🔧 Under Maintenance')
+        .setDescription('This command is currently under maintenance. Please try again later.');
+}
+
 async function updateLeaderboard() {
     const config = loadConfig();
+    if (config.statsMaintenance) return;
     const channelId = config.leaderboardChannelId;
     if (!channelId) return;
 
@@ -3274,6 +3287,12 @@ client.on('interactionCreate', async interaction => {
 
     // /claim
     if (interaction.commandName === 'claim') {
+        const maintenanceCfg = loadConfig();
+        if (maintenanceCfg.statsMaintenance) {
+            await interaction.reply({ embeds: [buildMaintenanceEmbed()] });
+            return;
+        }
+
         const mcUsername = interaction.options.getString('minecraft_username');
         const providedAmount = interaction.options.getNumber('amount');
         const discordUsername = interaction.user.username;
@@ -3410,6 +3429,12 @@ client.on('interactionCreate', async interaction => {
 
     // /stats
     if (interaction.commandName === 'stats') {
+        const maintenanceCfg = loadConfig();
+        if (maintenanceCfg.statsMaintenance) {
+            await interaction.reply({ embeds: [buildMaintenanceEmbed()] });
+            return;
+        }
+
         const sub = interaction.options.getSubcommand();
 
         // /stats private
@@ -3537,6 +3562,12 @@ client.on('interactionCreate', async interaction => {
 
     // /leader
     if (interaction.commandName === 'leader') {
+        const maintenanceCfg = loadConfig();
+        if (maintenanceCfg.statsMaintenance) {
+            await interaction.reply({ embeds: [buildMaintenanceEmbed()] });
+            return;
+        }
+
         await interaction.deferReply();
 
         // Serve from cache if still fresh
@@ -3578,6 +3609,42 @@ client.on('interactionCreate', async interaction => {
 
         leaderboardCache.set('leaderboard', { embed, ts: Date.now() });
         await interaction.editReply({ embeds: [embed] });
+        return;
+    }
+
+    // /maintenance
+    if (interaction.commandName === 'maintenance') {
+        const config = loadConfig();
+        const wasEnabled = !!config.statsMaintenance;
+        config.statsMaintenance = !wasEnabled;
+        saveConfig(config);
+
+        if (wasEnabled) {
+            // Maintenance turned OFF — resume leaderboard updates
+            startLeaderboardInterval();
+            await interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('✅ Maintenance Mode Disabled')
+                        .setDescription('Stats and leaderboard commands are now **active** again. Data will resume pulling from the API.'),
+                ],
+            });
+        } else {
+            // Maintenance turned ON — stop leaderboard updates
+            if (leaderboardInterval) {
+                clearInterval(leaderboardInterval);
+                leaderboardInterval = null;
+            }
+            await interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('🔧 Maintenance Mode Enabled')
+                        .setDescription('Stats and leaderboard commands are now **under maintenance**. Use `/maintenance` again to resume.'),
+                ],
+            });
+        }
         return;
     }
 
@@ -5683,6 +5750,12 @@ client.on('messageCreate', async message => {
 
     // ── !stats ────────────────────────────────────────────────────────────────
     if (cmd === 'stats') {
+        const maintenanceCfg = loadConfig();
+        if (maintenanceCfg.statsMaintenance) {
+            await message.reply({ embeds: [buildMaintenanceEmbed()] });
+            return;
+        }
+
         const sub = args[0] ? args[0].toLowerCase() : null;
 
         // !stats private
@@ -5786,6 +5859,12 @@ client.on('messageCreate', async message => {
 
     // ── !leader ───────────────────────────────────────────────────────────────
     if (cmd === 'leader') {
+        const maintenanceCfg = loadConfig();
+        if (maintenanceCfg.statsMaintenance) {
+            await message.reply({ embeds: [buildMaintenanceEmbed()] });
+            return;
+        }
+
         const cachedLeaderboard = leaderboardCache.get('leaderboard');
         if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
             await message.reply({ embeds: [cachedLeaderboard.embed] });
@@ -5828,6 +5907,12 @@ client.on('messageCreate', async message => {
 
     // ── !claim <minecraft_username> <amount> ──────────────────────────────────
     if (cmd === 'claim') {
+        const maintenanceCfg = loadConfig();
+        if (maintenanceCfg.statsMaintenance) {
+            await message.reply({ embeds: [buildMaintenanceEmbed()] });
+            return;
+        }
+
         const mcUsername = args[0];
         const providedAmount = parseFloat(args[1]);
 
