@@ -13,6 +13,8 @@ const {
     ButtonStyle,
     StringSelectMenuBuilder,
     StringSelectMenuOptionBuilder,
+    ChannelSelectMenuBuilder,
+    RoleSelectMenuBuilder,
     ModalBuilder,
     TextInputBuilder,
     TextInputStyle,
@@ -54,41 +56,8 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('settings')
-        .setDescription('Configure bot settings')
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-        .addSubcommand(sub =>
-            sub
-                .setName('channel')
-                .setDescription('Set the channel for restock notifications')
-                .addChannelOption(opt =>
-                    opt
-                        .setName('channel')
-                        .setDescription('The channel to send restock notifications in')
-                        .setRequired(true),
-                ),
-        )
-        .addSubcommand(sub =>
-            sub
-                .setName('role')
-                .setDescription('Set the role to ping on restock notifications')
-                .addRoleOption(opt =>
-                    opt
-                        .setName('role')
-                        .setDescription('The role to mention in restock notifications')
-                        .setRequired(true),
-                ),
-        )
-        .addSubcommand(sub =>
-            sub
-                .setName('leader-channel')
-                .setDescription('Set a channel for the auto-updating leaderboard')
-                .addChannelOption(opt =>
-                    opt
-                        .setName('channel')
-                        .setDescription('The channel to post the live leaderboard in')
-                        .setRequired(true),
-                ),
-        ),
+        .setDescription('View and configure all bot settings in one dashboard')
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
     new SlashCommandBuilder()
         .setName('restock')
@@ -450,8 +419,8 @@ const commands = [
     new SlashCommandBuilder()
         .setName('vc')
         .setDescription('Send a vouch message to the ticket creator and assign the vc role (ticket channels only)')
-        .addIntegerOption(opt =>
-            opt.setName('timer').setDescription('Minutes before the ticket auto-closes (optional)').setRequired(false).setMinValue(1),
+        .addStringOption(opt =>
+            opt.setName('timer').setDescription('Time before ticket auto-closes (e.g. 1m, 30m, 1h, 1hr, 1d)').setRequired(false),
         ),
 
     new SlashCommandBuilder()
@@ -468,6 +437,56 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .addRoleOption(opt =>
             opt.setName('role').setDescription('Role to assign').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('legit')
+        .setDescription('Configure the legit react channel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub =>
+            sub.setName('channel')
+                .setDescription('Set the channel where users react to confirm legitimacy')
+                .addChannelOption(opt =>
+                    opt.setName('channel').setDescription('The legit react channel').setRequired(true),
+                ),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('reviewlink')
+        .setDescription('Set the review link shown to users after vouching')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt.setName('url').setDescription('The review URL (e.g. Trustpilot link)').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('proof')
+        .setDescription('Send a proof message showing vouch channel, legit channel, and review link'),
+
+    // ── Automod commands ───────────────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('automod')
+        .setDescription('Manage automod settings')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addSubcommand(sub =>
+            sub.setName('setup')
+                .setDescription('Create the Automod Bypass role and enable link/word filtering'),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('banword')
+        .setDescription('Add a word to the banned words list')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt.setName('word').setDescription('The word to ban').setRequired(true),
+        ),
+
+    new SlashCommandBuilder()
+        .setName('unbanword')
+        .setDescription('Remove a word from the banned words list')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addStringOption(opt =>
+            opt.setName('word').setDescription('The word to unban').setRequired(true),
         ),
 
     // ── Sticky message commands ────────────────────────────────────────────────
@@ -1923,8 +1942,106 @@ function buildTypeConfigComponents(typeId) {
     return [row1, row2];
 }
 
+// ─── Settings dashboard helpers ───────────────────────────────────────────────
+
+const SETTINGS_DEFS = [
+    { key: 'notificationChannelId', label: '📣 Restock Channel', type: 'channel', description: 'Channel for restock notifications' },
+    { key: 'notificationRoleId', label: '🔔 Restock Ping Role', type: 'role', description: 'Role to ping for restocks' },
+    { key: 'leaderboardChannelId', label: '🏆 Leaderboard Channel', type: 'channel', description: 'Auto-updating leaderboard channel' },
+    { key: 'orderChannelId', label: '🛒 Order Channel', type: 'channel', description: 'New order notifications channel' },
+    { key: 'paidChannelId', label: '✅ Delivered Orders Channel', type: 'channel', description: 'Delivered orders channel' },
+    { key: 'reviewChannelId', label: '🔍 Review Queue Channel', type: 'channel', description: 'Orders needing review channel' },
+    { key: 'timezoneChannelId', label: '🕐 Staff Timezone Channel', type: 'channel', description: 'Live staff times channel' },
+    { key: 'vouchChannel', label: '📋 Vouch Channel', type: 'channel', description: 'Vouch requests channel' },
+    { key: 'vcRole', label: '🏅 VC Role', type: 'role', description: 'Role assigned after vouch flow' },
+    { key: 'legitChannel', label: '✔️ Legit React Channel', type: 'channel', description: 'Legit confirmation reacts channel' },
+    { key: 'reviewLink', label: '⭐ Review Link', type: 'url', description: 'External review link (e.g. Trustpilot)' },
+    { key: '__inviteChannel', label: '📨 Invite Notification Channel', type: 'channel', description: 'Invite join messages channel' },
+];
+
+function buildSettingsDashboardEmbed(guildId) {
+    const config = loadConfig();
+    const invData = loadInvites();
+    const fields = SETTINGS_DEFS.map(def => {
+        let val;
+        if (def.key === '__inviteChannel') {
+            const gd = invData[guildId] || {};
+            val = gd.inviteChannel ? `<#${gd.inviteChannel}>` : '*Not set*';
+        } else if (def.type === 'channel') {
+            val = config[def.key] ? `<#${config[def.key]}>` : '*Not set*';
+        } else if (def.type === 'role') {
+            val = config[def.key] ? `<@&${config[def.key]}>` : '*Not set*';
+        } else {
+            val = config[def.key] ? config[def.key] : '*Not set*';
+        }
+        return { name: def.label, value: val, inline: true };
+    });
+    return new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('⚙️ Bot Settings Dashboard')
+        .setDescription('Select a setting from the dropdown below to edit it. Changes take effect immediately.')
+        .addFields(fields)
+        .setFooter({ text: 'Tip: Use /ticket panel to configure the ticket system.' });
+}
+
+function buildSettingsDashboardComponents() {
+    const options = SETTINGS_DEFS.map(def =>
+        new StringSelectMenuOptionBuilder()
+            .setLabel(def.label)
+            .setValue(def.key)
+            .setDescription(def.description),
+    );
+    const select = new StringSelectMenuBuilder()
+        .setCustomId('settings_main_select')
+        .setPlaceholder('Choose a setting to edit…')
+        .addOptions(options);
+    return [new ActionRowBuilder().addComponents(select)];
+}
+
 // In-memory map for pending vc timers: ticketChannelId -> { creatorId, guildId, timer }
 const vcTimers = new Map();
+
+// ─── Duration parser for /vc timer option ─────────────────────────────────────
+function parseVcDuration(str) {
+    if (!str) return null;
+    const match = str.trim().toLowerCase().match(/^(\d+)\s*(m|min|mins|h|hr|hrs|hour|hours|d|day|days)$/);
+    if (!match) return null;
+    const num = parseInt(match[1], 10);
+    const unit = match[2];
+    if (unit.startsWith('d')) return num * 24 * 60 * 60 * 1000;
+    if (unit.startsWith('h')) return num * 60 * 60 * 1000;
+    return num * 60 * 1000;
+}
+
+// ─── Vouch channel name auto-update interval ──────────────────────────────────
+let vouchNameInterval = null;
+
+async function updateVouchChannelName() {
+    try {
+        const config = loadConfig();
+        const vouchChannelId = config.vouchChannel;
+        if (!vouchChannelId) return;
+
+        for (const guild of client.guilds.cache.values()) {
+            const channel = await guild.channels.fetch(vouchChannelId).catch(() => null);
+            if (!channel) continue;
+            const count = await countChannelMessages(channel);
+            const newName = `vouches│${count}`;
+            if (channel.name !== newName) {
+                await channel.setName(newName).catch(err => console.error('Failed to update vouch channel name:', err));
+            }
+            break;
+        }
+    } catch (err) {
+        console.error('Error updating vouch channel name:', err);
+    }
+}
+
+function startVouchChannelNameInterval() {
+    if (vouchNameInterval) clearInterval(vouchNameInterval);
+    updateVouchChannelName();
+    vouchNameInterval = setInterval(updateVouchChannelName, 5 * 60 * 1000);
+}
 
 // ─── Discord client ───────────────────────────────────────────────────────────
 
@@ -1950,6 +2067,8 @@ client.once('ready', async () => {
     if (config.orderChannelId) {
         startOrderPolling();
     }
+    // Start vouch channel name auto-update interval
+    startVouchChannelNameInterval();
     // Reload active giveaway timers
     reloadGiveawayTimers();
     // Cache guild invites for invite tracking
@@ -2426,7 +2545,7 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
-    if (!(interaction.isChatInputCommand() || interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit())) return;
+    if (!(interaction.isChatInputCommand() || interaction.isButton() || interaction.isStringSelectMenu() || interaction.isModalSubmit() || interaction.isChannelSelectMenu() || interaction.isRoleSelectMenu())) return;
 
     // /help
     if (interaction.commandName === 'help') {
@@ -2452,7 +2571,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '✅ Vouches',
-                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc [timer]` — Send vouch message to ticket creator & assign vc role\n`/vouchchannel channel:<#>` — Set the vouch channel\n`/vcrole role:<@>` — Set the role to give after vouching',
+                    value: '`/vouches` / `!vouches` — Show total vouch count\n`/vc [timer]` — Send vouch message (timer: `1m`, `1h`, `1d`)\n`/vouchchannel channel:<#>` — Set the vouch channel\n`/vcrole role:<@>` — Set the vc role\n`/legit channel:<#>` — Set the legit react channel\n`/reviewlink url:<url>` — Set the review link\n`/proof` — Show proof of legitimacy (vouches, legit, review)',
                     inline: false,
                 },
                 {
@@ -2462,7 +2581,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '📊 Stats & Loyalty',
-                    value: '`/stats view user:<@>` — View loyalty profile & order history\n`/stats private` — Make your stats private\n`/stats public` — Make your stats public\n`/claim minecraft_username:<name> amount:<$>` — Link Discord to purchase history\n`/leader` — Top 10 spenders leaderboard\n`/settings leader-channel channel:<#>` — Set auto-updating leaderboard channel',
+                    value: '`/stats view user:<@>` — View loyalty profile & order history\n`/stats private` — Make your stats private\n`/stats public` — Make your stats public\n`/claim minecraft_username:<name> amount:<$>` — Link Discord to purchase history\n`/leader` — Top 10 spenders leaderboard',
                     inline: false,
                 },
                 {
@@ -2472,7 +2591,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '⚙️ Settings',
-                    value: '`/settings channel channel:<#>` — Set restock notification channel\n`/settings role role:<@>` — Set role to ping for restocks\n`/order channel channel:<#>` — Set order notification channel\n`/paid channel channel:<#>` — Set delivered orders channel\n`/review channel channel:<#>` — Set review orders channel',
+                    value: '`/settings` — Open the unified settings dashboard (channels, roles, links, and more)\n`/ticket panel` — Configure the ticket panel (types, categories, questions, roles)',
                     inline: false,
                 },
                 {
@@ -2491,6 +2610,11 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
+                    name: '🤖 Automod',
+                    value: '`/automod setup` — Create the Automod Bypass role and enable filtering\n`/banword word` — Add a banned word\n`/unbanword word` — Remove a banned word',
+                    inline: false,
+                },
+                {
                     name: '📨 Embed Builder',
                     value: '`/embed title [description] [color] [footer] [image] [thumbnail] [author] [url]` — Send a custom embed',
                     inline: false,
@@ -2501,90 +2625,169 @@ client.on('interactionCreate', async interaction => {
                     inline: false,
                 },
                 {
+                    name: '🧮 Calculator',
+                    value: '`!calc <expression>` — Calculate math (supports `+`, `-`, `x`, `/`, `^`, parentheses)',
+                    inline: false,
+                },
+                {
                     name: '🔒 Owner Only',
                     value: '`?auth` — Show authorized user count\n`?pull <server_id>` — Pull authorized users to a server',
                     inline: false,
                 },
             )
-            .setFooter({ text: 'Use /settings channel before running /restock.' })
+            .setFooter({ text: 'Use /settings to configure channels before running /restock.' })
             .setTimestamp();
 
         await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
         return;
     }
 
-    // /settings channel
-    if (
-        interaction.commandName === 'settings' &&
-        interaction.options.getSubcommand() === 'channel'
-    ) {
-        const channel = interaction.options.getChannel('channel');
-        const config = loadConfig();
-        config.notificationChannelId = channel.id;
-        saveConfig(config);
+    // /settings — main dashboard
+    if (interaction.commandName === 'settings') {
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
+        await interaction.reply({ embeds: [embed], components, ephemeral: true });
+        return;
+    }
 
+    // ── Select: Settings main select ──────────────────────────────────────────
+    if (interaction.isStringSelectMenu() && interaction.customId === 'settings_main_select') {
+        const key = interaction.values[0];
+        const def = SETTINGS_DEFS.find(d => d.key === key);
+        if (!def) { await interaction.reply({ content: '❌ Unknown setting.', ephemeral: true }); return; }
+
+        if (def.type === 'channel') {
+            const chSelect = new ChannelSelectMenuBuilder()
+                .setCustomId(`settings_ch_select:${key}`)
+                .setPlaceholder(`Select a channel for ${def.label}…`);
+            const backBtn = new ButtonBuilder()
+                .setCustomId('settings_back')
+                .setLabel('← Back to Settings')
+                .setStyle(ButtonStyle.Secondary);
+            await interaction.update({
+                content: `**Editing: ${def.label}**\n${def.description}`,
+                embeds: [],
+                components: [
+                    new ActionRowBuilder().addComponents(chSelect),
+                    new ActionRowBuilder().addComponents(backBtn),
+                ],
+            });
+        } else if (def.type === 'role') {
+            const roleSelect = new RoleSelectMenuBuilder()
+                .setCustomId(`settings_role_select:${key}`)
+                .setPlaceholder(`Select a role for ${def.label}…`);
+            const backBtn = new ButtonBuilder()
+                .setCustomId('settings_back')
+                .setLabel('← Back to Settings')
+                .setStyle(ButtonStyle.Secondary);
+            await interaction.update({
+                content: `**Editing: ${def.label}**\n${def.description}`,
+                embeds: [],
+                components: [
+                    new ActionRowBuilder().addComponents(roleSelect),
+                    new ActionRowBuilder().addComponents(backBtn),
+                ],
+            });
+        } else {
+            // URL type — show modal
+            const config = loadConfig();
+            const currentVal = config[key] || '';
+            const modal = new ModalBuilder()
+                .setCustomId(`settings_modal:${key}`)
+                .setTitle(`Edit: ${def.label}`);
+            const input = new TextInputBuilder()
+                .setCustomId('value')
+                .setLabel(def.description)
+                .setStyle(TextInputStyle.Short)
+                .setRequired(false)
+                .setPlaceholder('Enter a URL (leave blank to clear)')
+                .setValue(currentVal);
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+            await interaction.showModal(modal);
+        }
+        return;
+    }
+
+    // ── Channel select: Settings ───────────────────────────────────────────────
+    if (interaction.isChannelSelectMenu() && interaction.customId.startsWith('settings_ch_select:')) {
+        const key = interaction.customId.slice('settings_ch_select:'.length);
+        const def = SETTINGS_DEFS.find(d => d.key === key);
+        const channelId = interaction.values[0];
+
+        if (key === '__inviteChannel') {
+            const invData = loadInvites();
+            if (!invData[interaction.guild.id]) invData[interaction.guild.id] = { users: {} };
+            invData[interaction.guild.id].inviteChannel = channelId;
+            saveInvites(invData);
+        } else {
+            const config = loadConfig();
+            config[key] = channelId;
+            if (key === 'leaderboardChannelId') config.leaderboardMessageId = null;
+            if (key === 'timezoneChannelId') delete config.timezoneMessageId;
+            saveConfig(config);
+            if (key === 'leaderboardChannelId') startLeaderboardInterval();
+            if (key === 'timezoneChannelId') startTimezoneInterval();
+            if (key === 'orderChannelId') await startOrderPolling();
+        }
+
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
+        await interaction.update({
+            content: `✅ **${def ? def.label : key}** updated to <#${channelId}>.`,
+            embeds: [embed],
+            components,
+        });
+        return;
+    }
+
+    // ── Role select: Settings ──────────────────────────────────────────────────
+    if (interaction.isRoleSelectMenu() && interaction.customId.startsWith('settings_role_select:')) {
+        const key = interaction.customId.slice('settings_role_select:'.length);
+        const def = SETTINGS_DEFS.find(d => d.key === key);
+        const roleId = interaction.values[0];
+        const config = loadConfig();
+        config[key] = roleId;
+        saveConfig(config);
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
+        await interaction.update({
+            content: `✅ **${def ? def.label : key}** updated to <@&${roleId}>.`,
+            embeds: [embed],
+            components,
+        });
+        return;
+    }
+
+    // ── Modal: Settings URL value ──────────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('settings_modal:')) {
+        const key = interaction.customId.slice('settings_modal:'.length);
+        const def = SETTINGS_DEFS.find(d => d.key === key);
+        const value = interaction.fields.getTextInputValue('value').trim();
+        const config = loadConfig();
+        if (value) {
+            config[key] = value;
+        } else {
+            delete config[key];
+        }
+        saveConfig(config);
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
         await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Settings Updated')
-                    .setDescription(
-                        `Restock notifications will now be sent to <#${channel.id}>.`,
-                    ),
-            ],
+            content: value
+                ? `✅ **${def ? def.label : key}** updated.`
+                : `🗑️ **${def ? def.label : key}** cleared.`,
+            embeds: [embed],
+            components,
             ephemeral: true,
         });
         return;
     }
 
-    // /settings role
-    if (
-        interaction.commandName === 'settings' &&
-        interaction.options.getSubcommand() === 'role'
-    ) {
-        const role = interaction.options.getRole('role');
-        const config = loadConfig();
-        config.notificationRoleId = role.id;
-        saveConfig(config);
-
-        await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Settings Updated')
-                    .setDescription(
-                        `<@&${role.id}> will now be pinged on restock notifications.`,
-                    ),
-            ],
-            ephemeral: true,
-        });
-        return;
-    }
-
-    // /settings leader-channel
-    if (
-        interaction.commandName === 'settings' &&
-        interaction.options.getSubcommand() === 'leader-channel'
-    ) {
-        const channel = interaction.options.getChannel('channel');
-        const config = loadConfig();
-        config.leaderboardChannelId = channel.id;
-        config.leaderboardMessageId = null;
-        saveConfig(config);
-
-        startLeaderboardInterval();
-
-        await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Leaderboard Channel Set')
-                    .setDescription(
-                        `The auto-updating leaderboard will be posted in <#${channel.id}> and refreshed every 10 minutes.`,
-                    ),
-            ],
-            ephemeral: true,
-        });
+    // ── Button: Settings back ──────────────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'settings_back') {
+        const embed = buildSettingsDashboardEmbed(interaction.guild.id);
+        const components = buildSettingsDashboardComponents();
+        await interaction.update({ content: null, embeds: [embed], components });
         return;
     }
 
@@ -2600,7 +2803,7 @@ client.on('interactionCreate', async interaction => {
                         .setColor(0xED4245)
                         .setTitle('❌ No Notification Channel Set')
                         .setDescription(
-                            'Please run `/settings channel` first to configure the notification channel.',
+                            'Please run `/settings` first to configure the notification channel.',
                         ),
                 ],
                 ephemeral: true,
@@ -2619,7 +2822,7 @@ client.on('interactionCreate', async interaction => {
                         .setColor(0xED4245)
                         .setTitle('❌ Channel Not Found')
                         .setDescription(
-                            'The configured notification channel could not be found. Please run `/settings channel` again.',
+                            'The configured notification channel could not be found. Please run `/settings` again.',
                         ),
                 ],
                 ephemeral: true,
@@ -3661,10 +3864,22 @@ client.on('interactionCreate', async interaction => {
     // ── Button: Ticket config — set category ─────────────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_category:')) {
         const typeId = interaction.customId.slice('tp_cfg_category:'.length);
-        const modal = new ModalBuilder().setCustomId(`tp_modal_category:${typeId}`).setTitle('Set Ticket Category');
-        const input = new TextInputBuilder().setCustomId('category_id').setLabel('Category Channel ID').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click category → Copy ID');
-        modal.addComponents(new ActionRowBuilder().addComponents(input));
-        await interaction.showModal(modal);
+        const chSelect = new ChannelSelectMenuBuilder()
+            .setCustomId(`tp_category_select:${typeId}`)
+            .setPlaceholder('Select a category channel…')
+            .addChannelTypes(ChannelType.GuildCategory);
+        const backBtn = new ButtonBuilder()
+            .setCustomId(`tp_cfg_back_to_type:${typeId}`)
+            .setLabel('← Back')
+            .setStyle(ButtonStyle.Secondary);
+        await interaction.update({
+            content: '🗂️ Select the category where tickets of this type will be created:',
+            embeds: [],
+            components: [
+                new ActionRowBuilder().addComponents(chSelect),
+                new ActionRowBuilder().addComponents(backBtn),
+            ],
+        });
         return;
     }
 
@@ -3692,19 +3907,23 @@ client.on('interactionCreate', async interaction => {
     // ── Button: Ticket config — set viewable roles ───────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_roles:')) {
         const typeId = interaction.customId.slice('tp_cfg_roles:'.length);
-        const tConf = getTicketConfig(interaction.guild.id);
-        const type = tConf.types.find(t => t.id === typeId);
-        const existing = type ? type.viewableRoles.join(', ') : '';
-        const modal = new ModalBuilder().setCustomId(`tp_modal_roles:${typeId}`).setTitle('Set Viewable Roles');
-        const input = new TextInputBuilder()
-            .setCustomId('role_ids')
-            .setLabel('Role IDs (comma-separated)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(false)
-            .setPlaceholder('123456789, 987654321')
-            .setValue(existing);
-        modal.addComponents(new ActionRowBuilder().addComponents(input));
-        await interaction.showModal(modal);
+        const roleSelect = new RoleSelectMenuBuilder()
+            .setCustomId(`tp_roles_select:${typeId}`)
+            .setPlaceholder('Select roles that can view this ticket type…')
+            .setMinValues(0)
+            .setMaxValues(10);
+        const backBtn = new ButtonBuilder()
+            .setCustomId(`tp_cfg_back_to_type:${typeId}`)
+            .setLabel('← Back')
+            .setStyle(ButtonStyle.Secondary);
+        await interaction.update({
+            content: '👁️ Select the roles that can see tickets of this type (select up to 10):',
+            embeds: [],
+            components: [
+                new ActionRowBuilder().addComponents(roleSelect),
+                new ActionRowBuilder().addComponents(backBtn),
+            ],
+        });
         return;
     }
 
@@ -3847,19 +4066,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     // ── Modal: Set ticket category ───────────────────────────────────────────
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_category:')) {
-        const typeId = interaction.customId.slice('tp_modal_category:'.length);
-        const catId = interaction.fields.getTextInputValue('category_id').trim();
-        const tConf = getTicketConfig(interaction.guild.id);
-        const type = tConf.types.find(t => t.id === typeId);
-        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
-        type.categoryId = catId;
-        saveTicketConfig(interaction.guild.id, tConf);
-        const embed = buildTypeConfigEmbed(type);
-        const components = buildTypeConfigComponents(typeId);
-        await interaction.reply({ embeds: [embed], components, ephemeral: true });
-        return;
-    }
+    // (replaced by channel select — tp_category_select handler below)
 
     // ── Modal: Set ticket questions ──────────────────────────────────────────
     if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_questions:')) {
@@ -3883,20 +4090,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     // ── Modal: Set ticket viewable roles ────────────────────────────────────
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('tp_modal_roles:')) {
-        const typeId = interaction.customId.slice('tp_modal_roles:'.length);
-        const tConf = getTicketConfig(interaction.guild.id);
-        const type = tConf.types.find(t => t.id === typeId);
-        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
-        const raw = interaction.fields.getTextInputValue('role_ids');
-        const roleIds = raw.split(',').map(r => r.trim()).filter(r => /^\d+$/.test(r));
-        type.viewableRoles = roleIds;
-        saveTicketConfig(interaction.guild.id, tConf);
-        const embed = buildTypeConfigEmbed(type);
-        const components = buildTypeConfigComponents(typeId);
-        await interaction.reply({ embeds: [embed], components, ephemeral: true });
-        return;
-    }
+    // (replaced by role select — tp_roles_select handler below)
 
     // ── Modal: Edit panel text ───────────────────────────────────────────────
     if (interaction.isModalSubmit() && interaction.customId === 'tp_modal_panel_text') {
@@ -3909,6 +4103,48 @@ client.on('interactionCreate', async interaction => {
         const embed = buildTicketPanelSettingsEmbed(interaction.guild.id);
         const components = buildTicketSettingsComponents(interaction.guild.id);
         await interaction.reply({ embeds: [embed], components, ephemeral: true });
+        return;
+    }
+
+    // ── Channel select: Ticket category ──────────────────────────────────────
+    if (interaction.isChannelSelectMenu() && interaction.customId.startsWith('tp_category_select:')) {
+        const typeId = interaction.customId.slice('tp_category_select:'.length);
+        const channelId = interaction.values[0];
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        type.categoryId = channelId;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ content: null, embeds: [embed], components });
+        return;
+    }
+
+    // ── Role select: Ticket viewable roles ────────────────────────────────────
+    if (interaction.isRoleSelectMenu() && interaction.customId.startsWith('tp_roles_select:')) {
+        const typeId = interaction.customId.slice('tp_roles_select:'.length);
+        const roleIds = interaction.values;
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        type.viewableRoles = roleIds;
+        saveTicketConfig(interaction.guild.id, tConf);
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ content: null, embeds: [embed], components });
+        return;
+    }
+
+    // ── Button: Ticket config — back to type view ─────────────────────────────
+    if (interaction.isButton() && interaction.customId.startsWith('tp_cfg_back_to_type:')) {
+        const typeId = interaction.customId.slice('tp_cfg_back_to_type:'.length);
+        const tConf = getTicketConfig(interaction.guild.id);
+        const type = tConf.types.find(t => t.id === typeId);
+        if (!type) { await interaction.reply({ content: '❌ Type not found.', ephemeral: true }); return; }
+        const embed = buildTypeConfigEmbed(type);
+        const components = buildTypeConfigComponents(typeId);
+        await interaction.update({ content: null, embeds: [embed], components });
         return;
     }
 
@@ -4236,20 +4472,31 @@ client.on('interactionCreate', async interaction => {
         const openTickets = getOpenTickets(interaction.guild.id);
         const ticket = openTickets[interaction.channel.id];
         if (!ticket) {
-            await interaction.reply({ content: '❌ This command can only be used inside a ticket channel.', ephemeral: true });
+            await interaction.reply({ content: '❌ This command can only be used inside a ticket channel.' });
             return;
         }
 
         const config = loadConfig();
         const vouchChannelId = config.vouchChannel;
         if (!vouchChannelId) {
-            await interaction.reply({ content: '❌ No vouch channel set. Use `/vouchchannel` first.', ephemeral: true });
+            await interaction.reply({ content: '❌ No vouch channel set. Use `/vouchchannel` first.' });
             return;
         }
 
         const creatorId = ticket.userId;
         const guildId = interaction.guild.id;
         const channelId = interaction.channel.id;
+
+        // Validate timer string if provided
+        const timerStr = interaction.options.getString('timer');
+        let timerMs = null;
+        if (timerStr) {
+            timerMs = parseVcDuration(timerStr);
+            if (timerMs === null) {
+                await interaction.reply({ content: '❌ Invalid timer format. Use formats like `1m`, `30m`, `1h`, `1hr`, `1d`.' });
+                return;
+            }
+        }
 
         // Immediately assign vc role to ticket creator
         const vcRoleId = config.vcRole;
@@ -4267,11 +4514,29 @@ client.on('interactionCreate', async interaction => {
             content: `<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`,
         });
 
-        // Optional timer to auto-close the ticket
-        const timerMinutes = interaction.options.getInteger('timer');
-        if (timerMinutes) {
-            const timerMs = timerMinutes * 60 * 1000;
+        // Legit react follow-up message
+        if (config.legitChannel) {
+            await interaction.channel.send({
+                content: `<@${creatorId}> please also react to the message in <#${config.legitChannel}> to confirm your legitimacy! ✅`,
+            });
+        }
 
+        // Review link follow-up message with embed and button
+        if (config.reviewLink) {
+            const reviewEmbed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setDescription("We'd love your feedback! Click the button below to leave us a review. ⭐");
+            const reviewRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setLabel('📝 Leave a Review')
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(config.reviewLink),
+            );
+            await interaction.channel.send({ embeds: [reviewEmbed], components: [reviewRow] });
+        }
+
+        // Optional timer to auto-close the ticket
+        if (timerMs) {
             if (vcTimers.has(channelId)) {
                 clearTimeout(vcTimers.get(channelId).timer);
             }
@@ -4318,6 +4583,152 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({
             embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ VC Role Set').setDescription(`<@&${role.id}> will be assigned to the ticket creator after the vouch flow.`)],
             ephemeral: true,
+        });
+        return;
+    }
+
+    // ── /legit ───────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'legit' && interaction.options.getSubcommand() === 'channel') {
+        const channel = interaction.options.getChannel('channel');
+        const config = loadConfig();
+        config.legitChannel = channel.id;
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Legit React Channel Set').setDescription(`Users will be asked to react in <#${channel.id}> to confirm legitimacy.`)],
+        });
+        return;
+    }
+
+    // ── /reviewlink ──────────────────────────────────────────────────────────
+    if (interaction.commandName === 'reviewlink') {
+        const url = interaction.options.getString('url');
+        const config = loadConfig();
+        config.reviewLink = url;
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Review Link Set').setDescription(`Users will be directed to leave a review at: ${url}`)],
+        });
+        return;
+    }
+
+    // ── /proof ───────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'proof') {
+        const config = loadConfig();
+        const fields = [];
+
+        if (config.vouchChannel) {
+            fields.push({ name: '📋 Vouches', value: `<#${config.vouchChannel}>`, inline: true });
+        }
+        if (config.legitChannel) {
+            fields.push({ name: '✅ Legit Reacts', value: `<#${config.legitChannel}>`, inline: true });
+        }
+        if (config.reviewLink) {
+            fields.push({ name: '⭐ Reviews', value: `[Leave a Review](${config.reviewLink})`, inline: true });
+        }
+
+        if (fields.length === 0) {
+            await interaction.reply({ content: '❌ No proof channels or review link configured yet.' });
+            return;
+        }
+
+        const proofEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🔒 Proof & Legitimacy')
+            .setDescription('Here is our proof of legitimacy. Check our vouches, legit reacts, and reviews!')
+            .addFields(...fields)
+            .setTimestamp();
+
+        const components = [];
+        if (config.reviewLink) {
+            components.push(
+                new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setLabel('📝 Leave a Review')
+                        .setStyle(ButtonStyle.Link)
+                        .setURL(config.reviewLink),
+                ),
+            );
+        }
+
+        await interaction.reply({ embeds: [proofEmbed], components });
+        return;
+    }
+
+    // ── /automod setup ───────────────────────────────────────────────────────
+    if (interaction.commandName === 'automod' && interaction.options.getSubcommand() === 'setup') {
+        const config = loadConfig();
+
+        // Check if role already exists and is still valid
+        if (config.automodRoleId) {
+            const existing = interaction.guild.roles.cache.get(config.automodRoleId)
+                || await interaction.guild.roles.fetch(config.automodRoleId).catch(() => null);
+            if (existing) {
+                await interaction.reply({
+                    embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ Automod Already Set Up').setDescription(`The Automod Bypass role already exists: <@&${existing.id}>\nMembers with this role can send links and any configured banned words.`)],
+                });
+                return;
+            }
+        }
+
+        // Create the bypass role
+        let bypassRole;
+        try {
+            bypassRole = await interaction.guild.roles.create({
+                name: 'Automod Bypass',
+                color: 0x99AAB5,
+                reason: 'Created by bot automod setup',
+            });
+        } catch (err) {
+            console.error('Failed to create automod role:', err);
+            await interaction.reply({ content: '❌ Failed to create the Automod Bypass role. Make sure I have the **Manage Roles** permission.' });
+            return;
+        }
+
+        config.automodRoleId = bypassRole.id;
+        saveConfig(config);
+
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Automod Set Up')
+                    .setDescription(`Created the <@&${bypassRole.id}> role.\n\n**Link filtering** and **banned word filtering** are now active.\nMembers with the **Automod Bypass** role are exempt.\n\nUse \`/banword\` to add banned words.`),
+            ],
+        });
+        return;
+    }
+
+    // ── /banword ─────────────────────────────────────────────────────────────
+    if (interaction.commandName === 'banword') {
+        const word = interaction.options.getString('word').toLowerCase().trim();
+        const config = loadConfig();
+        if (!config.bannedWords) config.bannedWords = [];
+        if (config.bannedWords.includes(word)) {
+            await interaction.reply({ content: `⚠️ \`${word}\` is already in the banned words list.` });
+            return;
+        }
+        config.bannedWords.push(word);
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Banned Word Added').setDescription(`\`${word}\` has been added to the banned words list.`)],
+        });
+        return;
+    }
+
+    // ── /unbanword ───────────────────────────────────────────────────────────
+    if (interaction.commandName === 'unbanword') {
+        const word = interaction.options.getString('word').toLowerCase().trim();
+        const config = loadConfig();
+        if (!config.bannedWords) config.bannedWords = [];
+        const idx = config.bannedWords.indexOf(word);
+        if (idx === -1) {
+            await interaction.reply({ content: `⚠️ \`${word}\` is not in the banned words list.` });
+            return;
+        }
+        config.bannedWords.splice(idx, 1);
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Banned Word Removed').setDescription(`\`${word}\` has been removed from the banned words list.`)],
         });
         return;
     }
@@ -4751,6 +5162,40 @@ const PREFIX = '!';
 
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
+    if (!message.guild) return;
+
+    // ── Automod ───────────────────────────────────────────────────────────────
+    const automodConfig = loadConfig();
+    const automodRoleId = automodConfig.automodRoleId;
+    if (automodRoleId) {
+        const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+        const hasAutomodBypass = member && member.roles.cache.has(automodRoleId);
+
+        if (!hasAutomodBypass) {
+            // Block links
+            const urlRegex = /https?:\/\/\S+|discord\.gg\/\S+|www\.\S+/i;
+            if (urlRegex.test(message.content)) {
+                await message.delete().catch(() => {});
+                const warn = await message.channel.send(`<@${message.author.id}> ❌ You are not allowed to send links.`).catch(() => null);
+                if (warn) setTimeout(() => warn.delete().catch(() => {}), 5000);
+                return;
+            }
+
+            // Block banned words
+            const bannedWords = automodConfig.bannedWords || [];
+            if (bannedWords.length > 0) {
+                const lowerContent = message.content.toLowerCase();
+                const foundWord = bannedWords.find(w => lowerContent.includes(w));
+                if (foundWord) {
+                    await message.delete().catch(() => {});
+                    const warn = await message.channel.send(`<@${message.author.id}> ❌ Your message contained a banned word.`).catch(() => null);
+                    if (warn) setTimeout(() => warn.delete().catch(() => {}), 5000);
+                    return;
+                }
+            }
+        }
+    }
+
     if (!message.content.startsWith(PREFIX)) return;
 
     const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
@@ -4780,7 +5225,7 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '✅ Vouches',
-                    value: '`/vouches` / `!vouches` — Show total vouch count in the configured channel\n`/vc [timer]` — Send vouch message to ticket creator & assign vc role\n`/vouchchannel channel` — Set the vouch channel\n`/vcrole role` — Set the role to give after vouching',
+                    value: '`/vouches` / `!vouches` — Show total vouch count\n`/vc [timer]` — Send vouch message (timer: `1m`, `1h`, `1d`)\n`/vouchchannel channel` — Set the vouch channel\n`/vcrole role` — Set the vc role\n`/legit channel` — Set the legit react channel\n`/reviewlink url` — Set the review link\n`/proof` — Show proof of legitimacy (vouches, legit, review)',
                     inline: false,
                 },
                 {
@@ -4790,7 +5235,7 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '📊 Stats & Loyalty',
-                    value: '`/stats view user` / `!stats @user` — View loyalty profile & order history\n`/stats private` / `!stats private` — Make your stats private\n`/stats public` / `!stats public` — Make your stats public\n`/claim minecraft_username amount` — Link Discord to purchase history\n`/leader` / `!leader` — Top 10 spenders leaderboard\n`/settings leader-channel channel` — Set auto-updating leaderboard channel',
+                    value: '`/stats view user` / `!stats @user` — View loyalty profile & order history\n`/stats private` / `!stats private` — Make your stats private\n`/stats public` / `!stats public` — Make your stats public\n`/claim minecraft_username amount` — Link Discord to purchase history\n`/leader` / `!leader` — Top 10 spenders leaderboard',
                     inline: false,
                 },
                 {
@@ -4800,7 +5245,7 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '⚙️ Settings',
-                    value: '`/settings channel channel` — Set restock notification channel\n`/settings role role` — Set role to ping for restocks\n`/order channel channel` — Set order notification channel\n`/paid channel channel` — Set delivered orders channel\n`/review channel channel` — Set review orders channel',
+                    value: '`/settings` — Open the unified settings dashboard (channels, roles, links, and more)\n`/ticket panel` — Configure the ticket panel (types, categories, questions, roles)',
                     inline: false,
                 },
                 {
@@ -4819,6 +5264,11 @@ client.on('messageCreate', async message => {
                     inline: false,
                 },
                 {
+                    name: '🤖 Automod',
+                    value: '`/automod setup` — Create the Automod Bypass role and enable filtering\n`/banword word` — Add a banned word\n`/unbanword word` — Remove a banned word',
+                    inline: false,
+                },
+                {
                     name: '📨 Embed Builder',
                     value: '`/embed title [description] [color] [footer] [image] [thumbnail] [author] [url]` — Send a custom embed',
                     inline: false,
@@ -4829,12 +5279,17 @@ client.on('messageCreate', async message => {
                     inline: false,
                 },
                 {
+                    name: '🧮 Calculator',
+                    value: '`!calc <expression>` — Calculate math (supports `+`, `-`, `x`, `/`, `^`, parentheses)',
+                    inline: false,
+                },
+                {
                     name: '🔒 Owner Only',
                     value: '`?auth` — Show authorized user count\n`?pull <server_id>` — Pull authorized users to a server',
                     inline: false,
                 },
             )
-            .setFooter({ text: 'Use !settings channel before running !restock.' })
+            .setFooter({ text: 'Use /settings to configure channels before running /restock.' })
             .setTimestamp();
 
         await message.reply({ embeds: [helpEmbed] });
@@ -4861,6 +5316,39 @@ client.on('messageCreate', async message => {
             .setDescription(`Total vouches: **${count}**\nChannel: <#${vouchChannelId}>`)
             .setTimestamp();
         await message.reply({ embeds: [vouchEmbed] });
+        return;
+    }
+
+    // ── !calc ─────────────────────────────────────────────────────────────────
+    if (cmd === 'calc') {
+        const expr = args.join(' ');
+        if (!expr) {
+            await message.reply('❌ Usage: `!calc <expression>`\nExample: `!calc 2 + 3 x 4`');
+            return;
+        }
+        let sanitized = expr.replace(/x/gi, '*').replace(/\^/g, '**');
+        if (!/^[\d\s\+\-\*\/\.\(\)]+$/.test(sanitized)) {
+            await message.reply('❌ Invalid expression. Only numbers, `+`, `-`, `x`, `/`, `^`, and `()` are allowed.');
+            return;
+        }
+        try {
+            const result = new Function('return ' + sanitized)();
+            if (typeof result !== 'number' || !isFinite(result)) {
+                await message.reply('❌ Could not calculate. Check your expression.');
+                return;
+            }
+            const calcEmbed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setTitle('🧮 Calculator')
+                .addFields(
+                    { name: 'Expression', value: `\`${expr}\``, inline: true },
+                    { name: 'Result', value: `\`${result}\``, inline: true },
+                )
+                .setTimestamp();
+            await message.reply({ embeds: [calcEmbed] });
+        } catch {
+            await message.reply('❌ Invalid expression. Check your syntax.');
+        }
         return;
     }
 
@@ -5379,7 +5867,7 @@ client.on('messageCreate', async message => {
                     new EmbedBuilder()
                         .setColor(0xED4245)
                         .setTitle('❌ No Notification Channel Set')
-                        .setDescription('Please run `!settings channel #channel` first to configure the notification channel.'),
+                        .setDescription('Please run `/settings` first to configure the notification channel.'),
                 ],
             });
             return;
@@ -5392,7 +5880,7 @@ client.on('messageCreate', async message => {
                     new EmbedBuilder()
                         .setColor(0xED4245)
                         .setTitle('❌ Channel Not Found')
-                        .setDescription('The configured notification channel could not be found. Please run `!settings channel` again.'),
+                        .setDescription('The configured notification channel could not be found. Please run `/settings` again.'),
                 ],
             });
             return;
