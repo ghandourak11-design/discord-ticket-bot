@@ -1566,6 +1566,8 @@ async function updateLeaderboard() {
     const channelId = config.leaderboardChannelId;
     if (!channelId) return;
 
+    if (config.statsMaintenance) return;
+
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
 
