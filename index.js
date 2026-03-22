@@ -1566,8 +1566,6 @@ async function updateLeaderboard() {
     const channelId = config.leaderboardChannelId;
     if (!channelId) return;
 
-    if (config.statsMaintenance) return;
-
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) return;
 
@@ -3281,17 +3279,15 @@ client.on('interactionCreate', async interaction => {
 
     // /claim
     if (interaction.commandName === 'claim') {
-        if (loadConfig().statsMaintenance) {
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
 
         const mcUsername = interaction.options.getString('minecraft_username');
         const providedAmount = interaction.options.getNumber('amount');
@@ -3429,6 +3425,16 @@ client.on('interactionCreate', async interaction => {
 
     // /stats
     if (interaction.commandName === 'stats') {
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
+
         const sub = interaction.options.getSubcommand();
 
         // /stats private
@@ -3458,18 +3464,6 @@ client.on('interactionCreate', async interaction => {
         }
 
         // /stats view
-        if (loadConfig().statsMaintenance) {
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
         const mentionedUser = interaction.options.getUser('user');
         const username = mentionedUser.username;
 
@@ -3597,17 +3591,15 @@ client.on('interactionCreate', async interaction => {
 
     // /leader
     if (interaction.commandName === 'leader') {
-        if (loadConfig().statsMaintenance) {
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
 
         await interaction.deferReply();
 
@@ -4931,7 +4923,10 @@ client.on('interactionCreate', async interaction => {
             } catch { /* already deleted */ }
         }
 
-        const stickyPayload = { content: `📌 ${message}` };
+        const stickyEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setDescription(`📌 ${message}`);
+        const stickyPayload = { embeds: [stickyEmbed] };
         if (showReview && config.reviewLink) {
             stickyPayload.components = [
                 new ActionRowBuilder().addComponents(
@@ -5244,7 +5239,10 @@ client.on('messageCreate', async message => {
             } catch { /* already gone */ }
         }
         // Re-post at the bottom
-        const stickyPayload = { content: `📌 ${sticky.content}` };
+        const stickyEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setDescription(`📌 ${sticky.content}`);
+        const stickyPayload = { embeds: [stickyEmbed] };
         if (sticky.showReview !== false && config.reviewLink) {
             stickyPayload.components = [
                 new ActionRowBuilder().addComponents(
@@ -5756,6 +5754,16 @@ client.on('messageCreate', async message => {
 
     // ── !stats ────────────────────────────────────────────────────────────────
     if (cmd === 'stats') {
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
+
         const sub = args[0] ? args[0].toLowerCase() : null;
 
         // !stats private
@@ -5779,18 +5787,6 @@ client.on('messageCreate', async message => {
         }
 
         // !stats @user  (or !stats view @user)
-        if (loadConfig().statsMaintenance) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
         let mentionedUser = message.mentions.users.first();
         if (!mentionedUser) {
             await message.reply('❌ Usage: `!stats @user`, `!stats private`, or `!stats public`');
@@ -5871,17 +5867,15 @@ client.on('messageCreate', async message => {
 
     // ── !leader ───────────────────────────────────────────────────────────────
     if (cmd === 'leader') {
-        if (loadConfig().statsMaintenance) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
 
         const cachedLeaderboard = leaderboardCache.get('leaderboard');
         if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
@@ -5925,17 +5919,15 @@ client.on('messageCreate', async message => {
 
     // ── !claim <minecraft_username> <amount> ──────────────────────────────────
     if (cmd === 'claim') {
-        if (loadConfig().statsMaintenance) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Under Maintenance')
-                        .setDescription('This command is currently under maintenance. Please try again later.'),
-                ],
-            });
-            return;
-        }
+        await message.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0xFFA500)
+                    .setTitle('🔧 Under Maintenance')
+                    .setDescription('This feature is currently under maintenance. Please try again later.'),
+            ],
+        });
+        return;
 
         const mcUsername = args[0];
         const providedAmount = parseFloat(args[1]);
