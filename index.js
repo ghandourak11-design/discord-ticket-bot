@@ -496,6 +496,9 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
         .addStringOption(opt =>
             opt.setName('message').setDescription('Message to stick').setRequired(true),
+        )
+        .addBooleanOption(opt =>
+            opt.setName('review').setDescription('Include a review button (requires /reviewlink to be set)').setRequired(false),
         ),
 
     new SlashCommandBuilder()
@@ -1064,6 +1067,102 @@ function fetchOrdersByMinecraft(mcUsername) {
 }
 
 /**
+ * Fetches orders for a given Discord username from the Base44 Order API.
+ *
+ * @param {string} discordUsername
+ * @returns {Promise<object[]>}  Array of order objects
+ */
+function fetchOrdersByDiscordUsername(discordUsername) {
+    return new Promise((resolve, reject) => {
+        if (!BASE44_APP_ID) {
+            reject(new Error('BASE44_APP_ID is not configured'));
+            return;
+        }
+
+        if (!STATS_API_KEY) {
+            reject(new Error('BASE44_API_KEY is not configured'));
+            return;
+        }
+
+        let urlObj;
+        try {
+            urlObj = new URL(ORDER_API_URL);
+        } catch {
+            reject(new Error('Order API URL is not valid'));
+            return;
+        }
+
+        urlObj.searchParams.set('discord_username', discordUsername);
+
+        const reqOptions = {
+            hostname: urlObj.hostname,
+            path: urlObj.pathname + urlObj.search,
+            method: 'GET',
+            headers: {
+                'api_key': STATS_API_KEY,
+                'Content-Type': 'application/json',
+            },
+        };
+
+        https
+            .get(reqOptions, res => {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res.resume();
+                    reject(new Error(`Order API returned status ${res.statusCode}`));
+                    return;
+                }
+                let raw = '';
+                res.on('data', chunk => { raw += chunk; });
+                res.on('end', () => {
+                    try {
+                        const data = JSON.parse(raw);
+                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
+                        resolve(results);
+                    } catch {
+                        reject(new Error('Failed to parse Order API response'));
+                    }
+                });
+            })
+            .on('error', reject);
+    });
+}
+
+/**
+ * Computes aggregated stats from an array of order objects.
+ *
+ * @param {object[]} orders
+ * @param {string} discordUsername
+ * @returns {object}  Synthesized customer-like object with order_count, total_spent, first_purchase_date, last_purchase_date
+ */
+function computeStatsFromOrders(orders, discordUsername) {
+    let totalSpent = 0;
+    let orderCount = 0;
+    let firstDate = Infinity;
+    let lastDate = 0;
+
+    for (const order of orders) {
+        const amount = getOrderAmount(order);
+        if (amount !== null) {
+            totalSpent += amount;
+        }
+        orderCount++;
+        const ts = getOrderDate(order);
+        if (ts > 0) {
+            if (ts < firstDate) firstDate = ts;
+            if (ts > lastDate) lastDate = ts;
+        }
+    }
+
+    return {
+        discord_username: discordUsername,
+        order_count: orderCount,
+        total_spent: totalSpent,
+        first_purchase_date: firstDate !== Infinity ? new Date(firstDate).toISOString() : null,
+        last_purchase_date: lastDate > 0 ? new Date(lastDate).toISOString() : null,
+    };
+}
+
+/**
  * Fetches all orders from the Base44 Order API (no filter).
  *
  * @returns {Promise<object[]>}  Array of all order records
@@ -1404,6 +1503,12 @@ async function pollOrders() {
             await channel.send({ embeds: [embed], components: [row] });
             seenOrderIds.add(orderId);
             dirty = true;
+
+            // Invalidate stats cache for this user so /stats reflects the new order
+            const orderDiscordUser = order.discord_username ?? order.discord_user ?? order.discord_name ?? null;
+            if (orderDiscordUser) {
+                statsCache.delete(orderDiscordUser.toLowerCase());
+            }
         } catch (err) {
             console.error('Failed to post order notification:', err);
         }
@@ -3363,12 +3468,18 @@ client.on('interactionCreate', async interaction => {
 
         let customer;
         try {
-            // Check if this Discord user has a claimed Minecraft username mapping
+            // Fetch orders from the Order API and compute stats
             const claimedMcUsername = config.claimedAccounts && config.claimedAccounts[username];
+            let orders;
             if (claimedMcUsername) {
-                customer = await fetchCustomerByMinecraft(claimedMcUsername);
+                orders = await fetchOrdersByMinecraft(claimedMcUsername);
             } else {
-                customer = await fetchCustomerData(username);
+                orders = await fetchOrdersByDiscordUsername(username);
+            }
+            if (orders.length > 0) {
+                customer = computeStatsFromOrders(orders, username);
+            } else {
+                customer = null;
             }
         } catch (err) {
             console.error('Stats API error:', err);
@@ -3377,7 +3488,7 @@ client.on('interactionCreate', async interaction => {
                     new EmbedBuilder()
                         .setColor(0xED4245)
                         .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch customer data. Please try again later.'),
+                        .setDescription('Could not fetch order data. Please try again later.'),
                 ],
             });
             return;
@@ -4509,19 +4620,14 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        // Send vouch message pinging the ticket creator
-        await interaction.reply({
-            content: `<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`,
-        });
-
-        // Legit react follow-up message
+        // Build a single consolidated reply with all /vc messages
+        const vcParts = [`<@${creatorId}> please head on over to <#${vouchChannelId}> and vouch for us! 🎉`];
         if (config.legitChannel) {
-            await interaction.channel.send({
-                content: `<@${creatorId}> please also react to the message in <#${config.legitChannel}> to confirm your legitimacy! ✅`,
-            });
+            vcParts.push(`Please also react to the message in <#${config.legitChannel}> to confirm your legitimacy! ✅`);
         }
 
-        // Review link follow-up message with embed and button
+        const vcReplyPayload = { content: vcParts.join('\n') };
+
         if (config.reviewLink) {
             const reviewEmbed = new EmbedBuilder()
                 .setColor(0x5865F2)
@@ -4532,8 +4638,11 @@ client.on('interactionCreate', async interaction => {
                     .setStyle(ButtonStyle.Link)
                     .setURL(config.reviewLink),
             );
-            await interaction.channel.send({ embeds: [reviewEmbed], components: [reviewRow] });
+            vcReplyPayload.embeds = [reviewEmbed];
+            vcReplyPayload.components = [reviewRow];
         }
+
+        await interaction.reply(vcReplyPayload);
 
         // Optional timer to auto-close the ticket
         if (timerMs) {
@@ -4736,6 +4845,7 @@ client.on('interactionCreate', async interaction => {
     // ── /stick ───────────────────────────────────────────────────────────────
     if (interaction.commandName === 'stick') {
         const message = interaction.options.getString('message');
+        const showReview = interaction.options.getBoolean('review') ?? false;
         const config = loadConfig();
         if (!config.stickyMessages) config.stickyMessages = {};
 
@@ -4748,8 +4858,20 @@ client.on('interactionCreate', async interaction => {
             } catch { /* already deleted */ }
         }
 
-        const sent = await interaction.channel.send({ content: `📌 ${message}` });
-        config.stickyMessages[interaction.channel.id] = { content: message, messageId: sent.id };
+        const stickyPayload = { content: `📌 ${message}` };
+        if (showReview && config.reviewLink) {
+            stickyPayload.components = [
+                new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setLabel('📝 Leave a Review')
+                        .setStyle(ButtonStyle.Link)
+                        .setURL(config.reviewLink),
+                ),
+            ];
+        }
+
+        const sent = await interaction.channel.send(stickyPayload);
+        config.stickyMessages[interaction.channel.id] = { content: message, messageId: sent.id, showReview };
         saveConfig(config);
 
         await interaction.reply({ content: '📌 Message stuck!', ephemeral: true });
@@ -5049,7 +5171,18 @@ client.on('messageCreate', async message => {
             } catch { /* already gone */ }
         }
         // Re-post at the bottom
-        const sent = await message.channel.send({ content: `📌 ${sticky.content}` });
+        const stickyPayload = { content: `📌 ${sticky.content}` };
+        if (sticky.showReview && config.reviewLink) {
+            stickyPayload.components = [
+                new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setLabel('📝 Leave a Review')
+                        .setStyle(ButtonStyle.Link)
+                        .setURL(config.reviewLink),
+                ),
+            ];
+        }
+        const sent = await message.channel.send(stickyPayload);
         const freshConfig = loadConfig();
         if (!freshConfig.stickyMessages) freshConfig.stickyMessages = {};
         if (freshConfig.stickyMessages[message.channel.id]) {
@@ -5602,10 +5735,16 @@ client.on('messageCreate', async message => {
         let customer;
         try {
             const claimedMcUsername = config.claimedAccounts && config.claimedAccounts[username];
+            let orders;
             if (claimedMcUsername) {
-                customer = await fetchCustomerByMinecraft(claimedMcUsername);
+                orders = await fetchOrdersByMinecraft(claimedMcUsername);
             } else {
-                customer = await fetchCustomerData(username);
+                orders = await fetchOrdersByDiscordUsername(username);
+            }
+            if (orders.length > 0) {
+                customer = computeStatsFromOrders(orders, username);
+            } else {
+                customer = null;
             }
         } catch (err) {
             console.error('Stats API error:', err);
@@ -5614,7 +5753,7 @@ client.on('messageCreate', async message => {
                     new EmbedBuilder()
                         .setColor(0xED4245)
                         .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch customer data. Please try again later.'),
+                        .setDescription('Could not fetch order data. Please try again later.'),
                 ],
             });
             return;
