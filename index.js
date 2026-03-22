@@ -542,6 +542,11 @@ const commands = [
         .addStringOption(opt =>
             opt.setName('url').setDescription('Title URL').setRequired(false),
         ),
+
+    new SlashCommandBuilder()
+        .setName('maintenance')
+        .setDescription('Toggle maintenance mode for stats and leaderboard commands')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -3410,6 +3415,14 @@ client.on('interactionCreate', async interaction => {
 
     // /stats
     if (interaction.commandName === 'stats') {
+        const maintenanceConfig = loadConfig();
+        if (maintenanceConfig.statsMaintenanceMode) {
+            await interaction.reply({
+                content: '🔧 This command is currently under maintenance. Please try again later.',
+            });
+            return;
+        }
+
         const sub = interaction.options.getSubcommand();
 
         // /stats private
@@ -3537,6 +3550,14 @@ client.on('interactionCreate', async interaction => {
 
     // /leader
     if (interaction.commandName === 'leader') {
+        const maintenanceConfig = loadConfig();
+        if (maintenanceConfig.statsMaintenanceMode) {
+            await interaction.reply({
+                content: '🔧 This command is currently under maintenance. Please try again later.',
+            });
+            return;
+        }
+
         await interaction.deferReply();
 
         // Serve from cache if still fresh
@@ -3578,6 +3599,26 @@ client.on('interactionCreate', async interaction => {
 
         leaderboardCache.set('leaderboard', { embed, ts: Date.now() });
         await interaction.editReply({ embeds: [embed] });
+        return;
+    }
+
+    // /maintenance
+    if (interaction.commandName === 'maintenance') {
+        const config = loadConfig();
+        config.statsMaintenanceMode = !config.statsMaintenanceMode;
+        saveConfig(config);
+
+        if (config.statsMaintenanceMode) {
+            await interaction.reply({
+                content: '🔧 Stats and leaderboard commands are now **under maintenance**.',
+                ephemeral: true,
+            });
+        } else {
+            await interaction.reply({
+                content: '✅ Stats and leaderboard commands have been **resumed**.',
+                ephemeral: true,
+            });
+        }
         return;
     }
 
@@ -5683,6 +5724,12 @@ client.on('messageCreate', async message => {
 
     // ── !stats ────────────────────────────────────────────────────────────────
     if (cmd === 'stats') {
+        const maintenanceConfig = loadConfig();
+        if (maintenanceConfig.statsMaintenanceMode) {
+            await message.reply('🔧 This command is currently under maintenance. Please try again later.');
+            return;
+        }
+
         const sub = args[0] ? args[0].toLowerCase() : null;
 
         // !stats private
@@ -5786,6 +5833,12 @@ client.on('messageCreate', async message => {
 
     // ── !leader ───────────────────────────────────────────────────────────────
     if (cmd === 'leader') {
+        const maintenanceConfig = loadConfig();
+        if (maintenanceConfig.statsMaintenanceMode) {
+            await message.reply('🔧 This command is currently under maintenance. Please try again later.');
+            return;
+        }
+
         const cachedLeaderboard = leaderboardCache.get('leaderboard');
         if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
             await message.reply({ embeds: [cachedLeaderboard.embed] });
