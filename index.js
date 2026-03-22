@@ -542,6 +542,11 @@ const commands = [
         .addStringOption(opt =>
             opt.setName('url').setDescription('Title URL').setRequired(false),
         ),
+
+    new SlashCommandBuilder()
+        .setName('maintenance')
+        .setDescription('Toggle maintenance mode for stats/leader/claim commands')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -3274,6 +3279,18 @@ client.on('interactionCreate', async interaction => {
 
     // /claim
     if (interaction.commandName === 'claim') {
+        if (loadConfig().statsMaintenance) {
+            await interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('🔧 Under Maintenance')
+                        .setDescription('This command is currently under maintenance. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
         const mcUsername = interaction.options.getString('minecraft_username');
         const providedAmount = interaction.options.getNumber('amount');
         const discordUsername = interaction.user.username;
@@ -3439,6 +3456,18 @@ client.on('interactionCreate', async interaction => {
         }
 
         // /stats view
+        if (loadConfig().statsMaintenance) {
+            await interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('🔧 Under Maintenance')
+                        .setDescription('This command is currently under maintenance. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
         const mentionedUser = interaction.options.getUser('user');
         const username = mentionedUser.username;
 
@@ -3535,8 +3564,49 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // /maintenance
+    if (interaction.commandName === 'maintenance') {
+        const config = loadConfig();
+        config.statsMaintenance = !config.statsMaintenance;
+        saveConfig(config);
+        if (config.statsMaintenance) {
+            await interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('🔧 Maintenance Mode Enabled')
+                        .setDescription('Stats, leader, and claim commands are now under maintenance. Users will see a maintenance message.'),
+                ],
+                ephemeral: true,
+            });
+        } else {
+            await interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle('✅ Maintenance Mode Disabled')
+                        .setDescription('Stats, leader, and claim commands are now back online and will resume pulling data from the API.'),
+                ],
+                ephemeral: true,
+            });
+        }
+        return;
+    }
+
     // /leader
     if (interaction.commandName === 'leader') {
+        if (loadConfig().statsMaintenance) {
+            await interaction.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('🔧 Under Maintenance')
+                        .setDescription('This command is currently under maintenance. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
         await interaction.deferReply();
 
         // Serve from cache if still fresh
@@ -4710,7 +4780,8 @@ client.on('interactionCreate', async interaction => {
 
     // ── /reviewlink ──────────────────────────────────────────────────────────
     if (interaction.commandName === 'reviewlink') {
-        const url = interaction.options.getString('url');
+        let url = interaction.options.getString('url');
+        if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
         const config = loadConfig();
         config.reviewLink = url;
         saveConfig(config);
@@ -4845,7 +4916,7 @@ client.on('interactionCreate', async interaction => {
     // ── /stick ───────────────────────────────────────────────────────────────
     if (interaction.commandName === 'stick') {
         const message = interaction.options.getString('message');
-        const showReview = interaction.options.getBoolean('review') ?? false;
+        const showReview = interaction.options.getBoolean('review') ?? true;
         const config = loadConfig();
         if (!config.stickyMessages) config.stickyMessages = {};
 
@@ -5172,7 +5243,7 @@ client.on('messageCreate', async message => {
         }
         // Re-post at the bottom
         const stickyPayload = { content: `📌 ${sticky.content}` };
-        if (sticky.showReview && config.reviewLink) {
+        if (sticky.showReview !== false && config.reviewLink) {
             stickyPayload.components = [
                 new ActionRowBuilder().addComponents(
                     new ButtonBuilder()
@@ -5706,6 +5777,18 @@ client.on('messageCreate', async message => {
         }
 
         // !stats @user  (or !stats view @user)
+        if (loadConfig().statsMaintenance) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('🔧 Under Maintenance')
+                        .setDescription('This command is currently under maintenance. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
         let mentionedUser = message.mentions.users.first();
         if (!mentionedUser) {
             await message.reply('❌ Usage: `!stats @user`, `!stats private`, or `!stats public`');
@@ -5786,6 +5869,18 @@ client.on('messageCreate', async message => {
 
     // ── !leader ───────────────────────────────────────────────────────────────
     if (cmd === 'leader') {
+        if (loadConfig().statsMaintenance) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('🔧 Under Maintenance')
+                        .setDescription('This command is currently under maintenance. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
         const cachedLeaderboard = leaderboardCache.get('leaderboard');
         if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
             await message.reply({ embeds: [cachedLeaderboard.embed] });
@@ -5828,6 +5923,18 @@ client.on('messageCreate', async message => {
 
     // ── !claim <minecraft_username> <amount> ──────────────────────────────────
     if (cmd === 'claim') {
+        if (loadConfig().statsMaintenance) {
+            await message.reply({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor(0xFFA500)
+                        .setTitle('🔧 Under Maintenance')
+                        .setDescription('This command is currently under maintenance. Please try again later.'),
+                ],
+            });
+            return;
+        }
+
         const mcUsername = args[0];
         const providedAmount = parseFloat(args[1]);
 
