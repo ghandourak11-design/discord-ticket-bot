@@ -4495,12 +4495,12 @@ client.on('interactionCreate', async interaction => {
         const userInv = (guildData.users || {})[interaction.user.id] || { real: 0, left: 0, fake: 0, bonus: 0 };
         const totalInvites = (userInv.real || 0) + (userInv.bonus || 0) - (userInv.left || 0);
 
-        if (totalInvites <= 0) {
-            await interaction.editReply({ content: '❌ You have no invites to claim.' });
+        if (totalInvites < 5) {
+            await interaction.editReply({ content: '❌ You need at least 5 invites to claim rewards.' });
             return;
         }
 
-        const amount = totalInvites * 5;
+        const amount = totalInvites * 3;
 
         // POST to Money API
         try {
@@ -4523,7 +4523,7 @@ client.on('interactionCreate', async interaction => {
         invData[interaction.guild.id].users[interaction.user.id] = { real: 0, left: 0, fake: 0, bonus: 0 };
         saveInvites(invData);
 
-        await interaction.editReply({ content: `✅ **${totalInvites}** invite${totalInvites !== 1 ? 's' : ''} claimed for **${mcUsername}** ($${amount}). Your rewards will be paid within 30 seconds.` });
+        await interaction.editReply({ content: 'your rewards will be paid in no more than 30 seconds' });
         return;
     }
 
