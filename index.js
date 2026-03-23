@@ -547,6 +547,12 @@ const commands = [
         .setName('maintenance')
         .setDescription('Toggle maintenance mode for stats/leader/claim commands')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    // ── Claim rewards panel command ────────────────────────────────────────────
+    new SlashCommandBuilder()
+        .setName('claimpanel')
+        .setDescription('Configure and post a Claim Rewards panel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -985,6 +991,9 @@ function fetchAllCustomers() {
 
 // Order endpoint: /api/apps/{APP_ID}/entities/Order
 const ORDER_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Order`;
+
+// Money endpoint: /api/apps/{APP_ID}/entities/Money
+const MONEY_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Money`;
 
 /**
  * Returns the date value from an order object, checking multiple known field names.
@@ -1940,6 +1949,22 @@ function saveTicketConfig(guildId, tConf) {
     saveConfig(config);
 }
 
+// ─── Claim Rewards Panel helpers ──────────────────────────────────────────────
+
+function getClaimPanelConfig(guildId) {
+    const config = loadConfig();
+    if (!config.claimPanelConfig) config.claimPanelConfig = {};
+    if (!config.claimPanelConfig[guildId]) config.claimPanelConfig[guildId] = {};
+    return config.claimPanelConfig[guildId];
+}
+
+function saveClaimPanelConfig(guildId, cpConf) {
+    const config = loadConfig();
+    if (!config.claimPanelConfig) config.claimPanelConfig = {};
+    config.claimPanelConfig[guildId] = cpConf;
+    saveConfig(config);
+}
+
 function getOpenTickets(guildId) {
     const config = loadConfig();
     if (!config.openTickets) config.openTickets = {};
@@ -2676,7 +2701,7 @@ client.on('interactionCreate', async interaction => {
                 },
                 {
                     name: '📨 Invite System',
-                    value: '`/invites [user]` — Check invite count\n`/addinvites user:<@> amount:<n>` — Add bonus invites\n`/resetinvites user:<@>` — Reset invite count\n`/invitechannel channel:<#>` — Set invite join message channel\n`/leaderboard` — Show top 10 inviters',
+                    value: '`/invites [user]` — Check invite count\n`/addinvites user:<@> amount:<n>` — Add bonus invites\n`/resetinvites user:<@>` — Reset invite count\n`/invitechannel channel:<#>` — Set invite join message channel\n`/leaderboard` — Show top 10 inviters\n`/claimpanel` — Configure and post a Claim Rewards panel',
                     inline: false,
                 },
                 {
@@ -4323,6 +4348,185 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // ── /claimpanel — Configure claim rewards panel ──────────────────────────
+    if (interaction.commandName === 'claimpanel') {
+        const cpConf = getClaimPanelConfig(interaction.guild.id);
+        const panelTitle = cpConf.panelTitle || '🎁 Claim Rewards';
+        const panelDesc = cpConf.panelDescription || 'Click the button below to claim your invite rewards!';
+
+        const configEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🎁 Claim Rewards Panel Configuration')
+            .setDescription('Configure the claim rewards panel text, then post it to the current channel.')
+            .addFields(
+                { name: 'Panel Title', value: panelTitle },
+                { name: 'Panel Description', value: panelDesc },
+            );
+
+        const editBtn = new ButtonBuilder()
+            .setCustomId('cp_edit_text')
+            .setLabel('✏️ Edit Panel Text')
+            .setStyle(ButtonStyle.Primary);
+        const postBtn = new ButtonBuilder()
+            .setCustomId('cp_post_panel')
+            .setLabel('📋 Post Claim Panel')
+            .setStyle(ButtonStyle.Success);
+
+        await interaction.reply({
+            embeds: [configEmbed],
+            components: [new ActionRowBuilder().addComponents(editBtn, postBtn)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── Button: Edit claim panel text ────────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'cp_edit_text') {
+        const cpConf = getClaimPanelConfig(interaction.guild.id);
+        const modal = new ModalBuilder().setCustomId('cp_modal_panel_text').setTitle('Edit Claim Panel Text');
+        const titleInput = new TextInputBuilder()
+            .setCustomId('cp_panel_title')
+            .setLabel('Panel Title')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setMaxLength(256)
+            .setValue(cpConf.panelTitle || '🎁 Claim Rewards');
+        const descInput = new TextInputBuilder()
+            .setCustomId('cp_panel_description')
+            .setLabel('Panel Description')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(4000)
+            .setValue(cpConf.panelDescription || 'Click the button below to claim your invite rewards!');
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(titleInput),
+            new ActionRowBuilder().addComponents(descInput),
+        );
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Modal: Save claim panel text ─────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId === 'cp_modal_panel_text') {
+        const panelTitle = interaction.fields.getTextInputValue('cp_panel_title').trim();
+        const panelDescription = interaction.fields.getTextInputValue('cp_panel_description').trim();
+        const cpConf = getClaimPanelConfig(interaction.guild.id);
+        cpConf.panelTitle = panelTitle;
+        cpConf.panelDescription = panelDescription;
+        saveClaimPanelConfig(interaction.guild.id, cpConf);
+
+        const configEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🎁 Claim Rewards Panel Configuration')
+            .setDescription('Configure the claim rewards panel text, then post it to the current channel.')
+            .addFields(
+                { name: 'Panel Title', value: panelTitle },
+                { name: 'Panel Description', value: panelDescription },
+            );
+
+        const editBtn = new ButtonBuilder()
+            .setCustomId('cp_edit_text')
+            .setLabel('✏️ Edit Panel Text')
+            .setStyle(ButtonStyle.Primary);
+        const postBtn = new ButtonBuilder()
+            .setCustomId('cp_post_panel')
+            .setLabel('📋 Post Claim Panel')
+            .setStyle(ButtonStyle.Success);
+
+        await interaction.reply({
+            embeds: [configEmbed],
+            components: [new ActionRowBuilder().addComponents(editBtn, postBtn)],
+            ephemeral: true,
+        });
+        return;
+    }
+
+    // ── Button: Post claim rewards panel ─────────────────────────────────────
+    if (interaction.isButton() && interaction.customId === 'cp_post_panel') {
+        const cpConf = getClaimPanelConfig(interaction.guild.id);
+        const panelEmbed = new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle(cpConf.panelTitle || '🎁 Claim Rewards')
+            .setDescription(cpConf.panelDescription || 'Click the button below to claim your invite rewards!');
+
+        const claimBtn = new ButtonBuilder()
+            .setCustomId('cp_claim_rewards')
+            .setLabel('🎁 Claim Rewards')
+            .setStyle(ButtonStyle.Success);
+
+        await interaction.channel.send({
+            embeds: [panelEmbed],
+            components: [new ActionRowBuilder().addComponents(claimBtn)],
+        });
+        await interaction.reply({ content: '✅ Claim rewards panel posted!', ephemeral: true });
+        return;
+    }
+
+    // ── Button: Claim rewards — show MC username modal ───────────────────────
+    if (interaction.isButton() && interaction.customId === 'cp_claim_rewards') {
+        const modal = new ModalBuilder()
+            .setCustomId('cp_modal_claim')
+            .setTitle('Claim Your Rewards');
+        const mcInput = new TextInputBuilder()
+            .setCustomId('cp_mc_username')
+            .setLabel('Minecraft Username')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setMaxLength(16)
+            .setPlaceholder('Enter your Minecraft username');
+        modal.addComponents(new ActionRowBuilder().addComponents(mcInput));
+        await interaction.showModal(modal);
+        return;
+    }
+
+    // ── Modal: Process claim rewards ─────────────────────────────────────────
+    if (interaction.isModalSubmit() && interaction.customId === 'cp_modal_claim') {
+        const mcUsername = interaction.fields.getTextInputValue('cp_mc_username').trim();
+        if (!mcUsername) {
+            await interaction.reply({ content: '❌ Please provide a valid Minecraft username.', ephemeral: true });
+            return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+
+        // Calculate invite total
+        const invData = loadInvites();
+        const guildData = invData[interaction.guild.id] || {};
+        const userInv = (guildData.users || {})[interaction.user.id] || { real: 0, left: 0, fake: 0, bonus: 0 };
+        const totalInvites = (userInv.real || 0) + (userInv.bonus || 0) - (userInv.left || 0);
+
+        if (totalInvites <= 0) {
+            await interaction.editReply({ content: '❌ You have no invites to claim.' });
+            return;
+        }
+
+        const amount = totalInvites * 5;
+
+        // POST to Money API
+        try {
+            const payload = JSON.stringify({ minecraft_username: mcUsername, amount });
+            const res = await inviteApiRequest('POST', MONEY_API_URL, payload);
+            if (res.status < 200 || res.status >= 300) {
+                console.error(`Claim rewards Money API returned status ${res.status}: ${res.body}`);
+                await interaction.editReply({ content: '❌ Failed to process your reward claim. Please try again later.' });
+                return;
+            }
+        } catch (err) {
+            console.error('Claim rewards Money API error:', err);
+            await interaction.editReply({ content: '❌ Failed to process your reward claim. Please try again later.' });
+            return;
+        }
+
+        // Reset invites
+        if (!invData[interaction.guild.id]) invData[interaction.guild.id] = { users: {} };
+        if (!invData[interaction.guild.id].users) invData[interaction.guild.id].users = {};
+        invData[interaction.guild.id].users[interaction.user.id] = { real: 0, left: 0, fake: 0, bonus: 0 };
+        saveInvites(invData);
+
+        await interaction.editReply({ content: `✅ **${totalInvites}** invite${totalInvites !== 1 ? 's' : ''} claimed for **${mcUsername}** ($${amount}). Your rewards will be paid within 30 seconds.` });
+        return;
+    }
+
     // ── Button: Open ticket ──────────────────────────────────────────────────
     if (interaction.isButton() && interaction.customId.startsWith('ticket_open:')) {
         const typeId = interaction.customId.slice('ticket_open:'.length);
@@ -5431,7 +5635,7 @@ client.on('messageCreate', async message => {
                 },
                 {
                     name: '📨 Invite System',
-                    value: '`/invites [user]` — Check invite count\n`/addinvites user amount` — Add bonus invites\n`/resetinvites user` — Reset invite count\n`/invitechannel channel` — Set invite join message channel\n`/leaderboard` — Show top 10 inviters',
+                    value: '`/invites [user]` — Check invite count\n`/addinvites user amount` — Add bonus invites\n`/resetinvites user` — Reset invite count\n`/invitechannel channel` — Set invite join message channel\n`/leaderboard` — Show top 10 inviters\n`/claimpanel` — Configure and post a Claim Rewards panel',
                     inline: false,
                 },
                 {
