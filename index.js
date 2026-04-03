@@ -1249,7 +1249,9 @@ function loadInvites() {
         try {
             const data = JSON.parse(fs.readFileSync(INVITES_PATH, 'utf8'));
             if (data && Object.keys(data).length > 0) return data;
-        } catch { /* fall through */ }
+        } catch (err) {
+            console.error('Failed to load invites.json, falling back to backup:', err.message);
+        }
     }
     // Fall back to backup
     if (fs.existsSync(INVITES_BACKUP_PATH)) {
@@ -1260,7 +1262,9 @@ function loadInvites() {
                 fs.writeFileSync(INVITES_PATH, JSON.stringify(data, null, 2), 'utf8');
                 return data;
             }
-        } catch { /* ignore */ }
+        } catch (err) {
+            console.error('Failed to restore invites from backup:', err.message);
+        }
     }
     return {};
 }
@@ -5215,7 +5219,7 @@ client.on('messageCreate', async message => {
         return;
     }
 
-    // ── !settings channel/role/leader-channel (Manage Server) ─────────────────
+    // ── !settings channel/role (Manage Server) ─────────────────────────────────
     if (cmd === 'settings') {
         if (!message.member || !message.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
             await message.reply('❌ You need **Manage Server** permission to use this command.');
