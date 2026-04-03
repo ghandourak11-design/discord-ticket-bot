@@ -1242,6 +1242,7 @@ function reloadGiveawayTimers() {
 
 const INVITES_PATH = path.join(__dirname, 'invites.json');
 const INVITES_BACKUP_PATH = path.join(__dirname, 'invites_backup.json');
+const INVITES_BACKUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 function loadInvites() {
     if (fs.existsSync(INVITES_PATH)) {
@@ -1611,7 +1612,7 @@ client.once('ready', async () => {
     await Promise.all([...client.guilds.cache.values()].map(guild => cacheGuildInvites(guild)));
 
     // Auto-backup invites every 10 minutes
-    setInterval(() => backupInvites(), 10 * 60 * 1000);
+    setInterval(() => backupInvites(), INVITES_BACKUP_INTERVAL_MS);
     backupInvites(); // Immediate backup on startup
 
     // Live invite count sync to Base44 every 60 seconds
