@@ -175,55 +175,9 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
-        .setName('stats')
-        .setDescription('Manage and view loyalty stats')
-        .addSubcommand(sub =>
-            sub
-                .setName('view')
-                .setDescription('View a user\'s loyalty stats')
-                .addUserOption(opt =>
-                    opt
-                        .setName('user')
-                        .setDescription('The user to look up')
-                        .setRequired(true),
-                ),
-        )
-        .addSubcommand(sub =>
-            sub
-                .setName('private')
-                .setDescription('Set your stats to private'),
-        )
-        .addSubcommand(sub =>
-            sub
-                .setName('public')
-                .setDescription('Set your stats to public'),
-        ),
-
-    new SlashCommandBuilder()
-        .setName('claim')
-        .setDescription('Link your Discord account to your purchase history using your Minecraft username')
-        .addStringOption(opt =>
-            opt
-                .setName('minecraft_username')
-                .setDescription('The Minecraft username you used at checkout')
-                .setRequired(true),
-        )
-        .addNumberOption(opt =>
-            opt
-                .setName('amount')
-                .setDescription('Your most recent order amount in USD (e.g. 17.64)')
-                .setRequired(true)
-                .setMinValue(0),
-        ),
-
-    new SlashCommandBuilder()
         .setName('sync')
         .setDescription('Re-sync all bot slash commands')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-    new SlashCommandBuilder()
-        .setName('leader')
-        .setDescription('Display the top 10 spenders leaderboard'),
 
     new SlashCommandBuilder()
         .setName('setup-verify')
@@ -543,16 +497,23 @@ const commands = [
             opt.setName('url').setDescription('Title URL').setRequired(false),
         ),
 
-    new SlashCommandBuilder()
-        .setName('maintenance')
-        .setDescription('Toggle maintenance mode for stats/leader/claim commands')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
     // ── Claim rewards panel command ────────────────────────────────────────────
     new SlashCommandBuilder()
         .setName('claimpanel')
         .setDescription('Configure and post a Claim Rewards panel')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
+        .setName('multiplier')
+        .setDescription('Set the invite rewards multiplier')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .addNumberOption(opt =>
+            opt
+                .setName('value')
+                .setDescription('The new multiplier value')
+                .setRequired(true)
+                .setMinValue(1),
+        ),
 ].map(cmd => cmd.toJSON());
 
 // ─── Register commands with Discord ──────────────────────────────────────────
@@ -746,249 +707,6 @@ const BASE44_API_BASE_URL = process.env.BASE44_API_URL || 'https://app.base44.co
 const STATS_API_KEY = process.env.BASE44_API_KEY || '';
 const BASE44_APP_ID = process.env.BASE44_APP_ID || '698bba4e9e06a075e7c32be6';
 
-// Customer endpoint: /api/apps/{APP_ID}/entities/Customer
-const CUSTOMER_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Customer`;
-
-/**
- * Formats a date string into a readable format (e.g., "Mar 11, 2026").
- * Returns "N/A" if the value is null, undefined, or empty.
- *
- * @param {string|null|undefined} dateStr
- * @returns {string}
- */
-function formatDate(dateStr) {
-    if (!dateStr) return 'N/A';
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return 'N/A';
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-/**
- * Calculates loyalty points from total amount spent.
- * Every $1 spent = 0.1 loyalty points, max 100.
- * (Requires $1,000 spent to reach the maximum of 100 points.)
- *
- * @param {number} totalSpent
- * @returns {number}
- */
-function calcLoyaltyPoints(totalSpent) {
-    return Math.min(100, Math.round(totalSpent * 0.1 * 10) / 10);
-}
-
-/**
- * Builds a visual progress bar using Unicode block characters (20 segments wide).
- * Renders as a clean single-line bar that works well on mobile.
- *
- * @param {number} points  0–100
- * @returns {string}
- */
-function buildLoyaltyBar(points) {
-    const TOTAL_WIDTH = 20;
-    const filled = Math.round((points / 100) * TOTAL_WIDTH);
-    const empty = TOTAL_WIDTH - filled;
-    return '█'.repeat(filled) + '░'.repeat(empty);
-}
-
-const TIERS = [
-    { name: 'Diamond',  color: 0xB9F2FF, emoji: '💎', minSpent: 500 },
-    { name: 'Platinum', color: 0xE5E4E2, emoji: '🏆', minSpent: 200 },
-    { name: 'Gold',     color: 0xFFD700, emoji: '🥇', minSpent: 75  },
-    { name: 'Silver',   color: 0xC0C0C0, emoji: '🥈', minSpent: 25  },
-    { name: 'Bronze',   color: 0xCD7F32, emoji: '🥉', minSpent: 1   },
-    { name: 'Unranked', color: 0x808080, emoji: '🔘', minSpent: 0   },
-];
-
-function getTier(totalSpent) {
-    for (const tier of TIERS) {
-        if (totalSpent >= tier.minSpent) return tier;
-    }
-    return TIERS[TIERS.length - 1]; // Unranked
-}
-
-// Simple in-memory cache to avoid hammering the API
-const statsCache = new Map();
-const STATS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-/**
- * Fetches customer data for a given Discord username from the Base44 Customer API.
- *
- * @param {string} discordUsername
- * @returns {Promise<object|null>}  Customer record or null if not found
- */
-function fetchCustomerData(discordUsername) {
-    return new Promise((resolve, reject) => {
-        if (!BASE44_APP_ID) {
-            reject(new Error('BASE44_APP_ID is not configured'));
-            return;
-        }
-
-        if (!STATS_API_KEY) {
-            reject(new Error('BASE44_API_KEY is not configured'));
-            return;
-        }
-
-        let urlObj;
-        try {
-            urlObj = new URL(CUSTOMER_API_URL);
-        } catch {
-            reject(new Error('Customer API URL is not valid'));
-            return;
-        }
-
-        urlObj.searchParams.set('discord_username', discordUsername);
-
-        const reqOptions = {
-            hostname: urlObj.hostname,
-            path: urlObj.pathname + urlObj.search,
-            method: 'GET',
-            headers: {
-                'api_key': STATS_API_KEY,
-                'Content-Type': 'application/json',
-            },
-        };
-
-        https
-            .get(reqOptions, res => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    res.resume();
-                    reject(new Error(`Customer API returned status ${res.statusCode}`));
-                    return;
-                }
-                let raw = '';
-                res.on('data', chunk => { raw += chunk; });
-                res.on('end', () => {
-                    try {
-                        const data = JSON.parse(raw);
-                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
-                        resolve(results.length > 0 ? results[0] : null);
-                    } catch {
-                        reject(new Error('Failed to parse Customer API response'));
-                    }
-                });
-            })
-            .on('error', reject);
-    });
-}
-
-/**
- * Fetches customer data for a given Minecraft username from the Base44 Customer API.
- *
- * @param {string} mcUsername
- * @returns {Promise<object|null>}  Customer record or null if not found
- */
-function fetchCustomerByMinecraft(mcUsername) {
-    return new Promise((resolve, reject) => {
-        if (!BASE44_APP_ID) {
-            reject(new Error('BASE44_APP_ID is not configured'));
-            return;
-        }
-
-        if (!STATS_API_KEY) {
-            reject(new Error('BASE44_API_KEY is not configured'));
-            return;
-        }
-
-        let urlObj;
-        try {
-            urlObj = new URL(CUSTOMER_API_URL);
-        } catch {
-            reject(new Error('Customer API URL is not valid'));
-            return;
-        }
-
-        urlObj.searchParams.set('minecraft_username', mcUsername);
-
-        const reqOptions = {
-            hostname: urlObj.hostname,
-            path: urlObj.pathname + urlObj.search,
-            method: 'GET',
-            headers: {
-                'api_key': STATS_API_KEY,
-                'Content-Type': 'application/json',
-            },
-        };
-
-        https
-            .get(reqOptions, res => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    res.resume();
-                    reject(new Error(`Customer API returned status ${res.statusCode}`));
-                    return;
-                }
-                let raw = '';
-                res.on('data', chunk => { raw += chunk; });
-                res.on('end', () => {
-                    try {
-                        const data = JSON.parse(raw);
-                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
-                        resolve(results.length > 0 ? results[0] : null);
-                    } catch {
-                        reject(new Error('Failed to parse Customer API response'));
-                    }
-                });
-            })
-            .on('error', reject);
-    });
-}
-
-/**
- * Fetches all customer records from the Base44 Customer API (no filter).
- *
- * @returns {Promise<object[]>}  Array of all customer records
- */
-function fetchAllCustomers() {
-    return new Promise((resolve, reject) => {
-        if (!BASE44_APP_ID) {
-            reject(new Error('BASE44_APP_ID is not configured'));
-            return;
-        }
-
-        if (!STATS_API_KEY) {
-            reject(new Error('BASE44_API_KEY is not configured'));
-            return;
-        }
-
-        let urlObj;
-        try {
-            urlObj = new URL(CUSTOMER_API_URL);
-        } catch {
-            reject(new Error('Customer API URL is not valid'));
-            return;
-        }
-
-        const reqOptions = {
-            hostname: urlObj.hostname,
-            path: urlObj.pathname + urlObj.search,
-            method: 'GET',
-            headers: {
-                'api_key': STATS_API_KEY,
-                'Content-Type': 'application/json',
-            },
-        };
-
-        https
-            .get(reqOptions, res => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    res.resume();
-                    reject(new Error(`Customer API returned status ${res.statusCode}`));
-                    return;
-                }
-                let raw = '';
-                res.on('data', chunk => { raw += chunk; });
-                res.on('end', () => {
-                    try {
-                        const data = JSON.parse(raw);
-                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
-                        resolve(results);
-                    } catch {
-                        reject(new Error('Failed to parse Customer API response'));
-                    }
-                });
-            })
-            .on('error', reject);
-    });
-}
-
 // Order endpoint: /api/apps/{APP_ID}/entities/Order
 const ORDER_API_URL = `${BASE44_API_BASE_URL.replace(/\/$/, '')}/api/apps/${BASE44_APP_ID}/entities/Order`;
 
@@ -1017,163 +735,6 @@ function getOrderDate(order) {
 function getOrderAmount(order) {
     const val = order.amount_total ?? order.total ?? order.amount ?? order.order_total ?? null;
     return typeof val === 'number' ? val : null;
-}
-
-/**
- * Fetches orders for a given Minecraft username from the Base44 Order API.
- *
- * @param {string} mcUsername
- * @returns {Promise<object[]>}  Array of order objects
- */
-function fetchOrdersByMinecraft(mcUsername) {
-    return new Promise((resolve, reject) => {
-        if (!BASE44_APP_ID) {
-            reject(new Error('BASE44_APP_ID is not configured'));
-            return;
-        }
-
-        if (!STATS_API_KEY) {
-            reject(new Error('BASE44_API_KEY is not configured'));
-            return;
-        }
-
-        let urlObj;
-        try {
-            urlObj = new URL(ORDER_API_URL);
-        } catch {
-            reject(new Error('Order API URL is not valid'));
-            return;
-        }
-
-        urlObj.searchParams.set('minecraft_username', mcUsername);
-
-        const reqOptions = {
-            hostname: urlObj.hostname,
-            path: urlObj.pathname + urlObj.search,
-            method: 'GET',
-            headers: {
-                'api_key': STATS_API_KEY,
-                'Content-Type': 'application/json',
-            },
-        };
-
-        https
-            .get(reqOptions, res => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    res.resume();
-                    reject(new Error(`Order API returned status ${res.statusCode}`));
-                    return;
-                }
-                let raw = '';
-                res.on('data', chunk => { raw += chunk; });
-                res.on('end', () => {
-                    try {
-                        const data = JSON.parse(raw);
-                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
-                        resolve(results);
-                    } catch {
-                        reject(new Error('Failed to parse Order API response'));
-                    }
-                });
-            })
-            .on('error', reject);
-    });
-}
-
-/**
- * Fetches orders for a given Discord username from the Base44 Order API.
- *
- * @param {string} discordUsername
- * @returns {Promise<object[]>}  Array of order objects
- */
-function fetchOrdersByDiscordUsername(discordUsername) {
-    return new Promise((resolve, reject) => {
-        if (!BASE44_APP_ID) {
-            reject(new Error('BASE44_APP_ID is not configured'));
-            return;
-        }
-
-        if (!STATS_API_KEY) {
-            reject(new Error('BASE44_API_KEY is not configured'));
-            return;
-        }
-
-        let urlObj;
-        try {
-            urlObj = new URL(ORDER_API_URL);
-        } catch {
-            reject(new Error('Order API URL is not valid'));
-            return;
-        }
-
-        urlObj.searchParams.set('discord_username', discordUsername);
-
-        const reqOptions = {
-            hostname: urlObj.hostname,
-            path: urlObj.pathname + urlObj.search,
-            method: 'GET',
-            headers: {
-                'api_key': STATS_API_KEY,
-                'Content-Type': 'application/json',
-            },
-        };
-
-        https
-            .get(reqOptions, res => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    res.resume();
-                    reject(new Error(`Order API returned status ${res.statusCode}`));
-                    return;
-                }
-                let raw = '';
-                res.on('data', chunk => { raw += chunk; });
-                res.on('end', () => {
-                    try {
-                        const data = JSON.parse(raw);
-                        const results = Array.isArray(data) ? data : (data.results ?? data.items ?? []);
-                        resolve(results);
-                    } catch {
-                        reject(new Error('Failed to parse Order API response'));
-                    }
-                });
-            })
-            .on('error', reject);
-    });
-}
-
-/**
- * Computes aggregated stats from an array of order objects.
- *
- * @param {object[]} orders
- * @param {string} discordUsername
- * @returns {object}  Synthesized customer-like object with order_count, total_spent, first_purchase_date, last_purchase_date
- */
-function computeStatsFromOrders(orders, discordUsername) {
-    let totalSpent = 0;
-    let orderCount = 0;
-    let firstDate = Infinity;
-    let lastDate = 0;
-
-    for (const order of orders) {
-        const amount = getOrderAmount(order);
-        if (amount !== null) {
-            totalSpent += amount;
-        }
-        orderCount++;
-        const ts = getOrderDate(order);
-        if (ts > 0) {
-            if (ts < firstDate) firstDate = ts;
-            if (ts > lastDate) lastDate = ts;
-        }
-    }
-
-    return {
-        discord_username: discordUsername,
-        order_count: orderCount,
-        total_spent: totalSpent,
-        first_purchase_date: firstDate !== Infinity ? new Date(firstDate).toISOString() : null,
-        last_purchase_date: lastDate > 0 ? new Date(lastDate).toISOString() : null,
-    };
 }
 
 /**
@@ -1232,102 +793,6 @@ function fetchAllOrders() {
             })
             .on('error', reject);
     });
-}
-
-/**
- * Updates the discord_username field on a customer record.
- *
- * @param {string} customerId
- * @param {string} discordUsername
- * @returns {Promise<object>}
- */
-function updateCustomerDiscordUsername(customerId, discordUsername) {
-    return new Promise((resolve, reject) => {
-        const apiUrl = new URL(`${CUSTOMER_API_URL}/${encodeURIComponent(customerId)}`);
-        const body = JSON.stringify({ discord_username: discordUsername });
-
-        const options = {
-            hostname: apiUrl.hostname,
-            path: apiUrl.pathname,
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(body),
-                'api_key': STATS_API_KEY,
-            },
-        };
-
-        const req = https.request(options, res => {
-            if (res.statusCode < 200 || res.statusCode >= 300) {
-                let errBody = '';
-                res.on('data', chunk => { errBody += chunk; });
-                res.on('end', () => {
-                    reject(new Error(`Customer API returned status ${res.statusCode}: ${errBody}`));
-                });
-                return;
-            }
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch {
-                    resolve({});
-                }
-            });
-        });
-
-        req.on('error', reject);
-        req.write(body);
-        req.end();
-    });
-}
-
-function buildStatsEmbed(customer, discordMember) {
-    const username = discordMember ? discordMember.user.username : (customer.discord_username || 'Unknown');
-    const avatarUrl = discordMember
-        ? discordMember.user.displayAvatarURL({ size: 128 })
-        : null;
-
-    const orderCount = typeof customer.order_count === 'number' ? customer.order_count : 0;
-    const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
-
-    const tier = getTier(totalSpent);
-    const points = calcLoyaltyPoints(totalSpent);
-    const bar = buildLoyaltyBar(points);
-    const separator = '─'.repeat(30);
-
-    const embed = new EmbedBuilder()
-        .setColor(tier.color)
-        .setTitle(`${tier.emoji} Profile — ${username}`)
-        .setDescription(`🟡 **Loyalty Points: ${points % 1 === 0 ? points : points.toFixed(1)}/100**\n\`${bar}\`\n${separator}`)
-        .addFields(
-            {
-                name: '🏅 Standing',
-                value: [
-                    `**Rank:** ${tier.emoji} ${tier.name}`,
-                    `**Total Spent:** $${totalSpent.toFixed(2)}`,
-                    `**Orders:** ${orderCount}`,
-                ].join('\n'),
-                inline: true,
-            },
-            {
-                name: '📈 Activity',
-                value: [
-                    `**First Purchase:** ${formatDate(customer.first_purchase_date)}`,
-                    `**Last Purchase:** ${formatDate(customer.last_purchase_date)}`,
-                ].join('\n'),
-                inline: true,
-            },
-        )
-        .setFooter({ text: 'DonutDemand Bot' })
-        .setTimestamp();
-
-    if (avatarUrl) {
-        embed.setThumbnail(avatarUrl);
-    }
-
-    return embed;
 }
 
 function buildRestockEmbed(product, quantity) {
@@ -1517,12 +982,6 @@ async function pollOrders() {
             await channel.send({ embeds: [embed], components: [row] });
             seenOrderIds.add(orderId);
             dirty = true;
-
-            // Invalidate stats cache for this user so /stats reflects the new order
-            const orderDiscordUser = order.discord_username ?? order.discord_user ?? order.discord_name ?? null;
-            if (orderDiscordUser) {
-                statsCache.delete(orderDiscordUser.toLowerCase());
-            }
         } catch (err) {
             console.error('Failed to post order notification:', err);
         }
@@ -1536,84 +995,6 @@ async function pollOrders() {
 }
 
 
-
-const leaderboardCache = new Map();
-const LEADERBOARD_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const LEADERBOARD_UPDATE_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-let leaderboardInterval = null;
-
-const LEADERBOARD_MEDALS = ['🥇', '🥈', '🥉'];
-
-function buildLeaderboardEmbed(customers) {
-    const eligible = customers
-        .filter(c => c.discord_username && c.discord_username.trim() !== '')
-        .sort((a, b) => (b.total_spent || 0) - (a.total_spent || 0))
-        .slice(0, 10);
-
-    if (eligible.length === 0) return null;
-
-    const leaderboardLines = eligible.map((c, i) => {
-        const prefix = i < 3 ? LEADERBOARD_MEDALS[i] : `${i + 1}.`;
-        const spent = (c.total_spent || 0).toLocaleString('en-US', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-        });
-        return `${prefix} **${c.discord_username}** — $${spent}`;
-    });
-
-    const intervalMinutes = LEADERBOARD_UPDATE_INTERVAL_MS / 60000;
-    return new EmbedBuilder()
-        .setColor(0x1E1F22)
-        .setTitle('🏆 Top 10 Spenders')
-        .setDescription(leaderboardLines.join('\n'))
-        .setFooter({ text: `Updated every ${intervalMinutes} minutes • DonutDemand Bot` })
-        .setTimestamp();
-}
-
-async function updateLeaderboard() {
-    const config = loadConfig();
-    const channelId = config.leaderboardChannelId;
-    if (!channelId) return;
-
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel) return;
-
-    let customers;
-    try {
-        customers = await fetchAllCustomers();
-    } catch (err) {
-        console.error('Leaderboard update failed:', err);
-        return;
-    }
-
-    const embed = buildLeaderboardEmbed(customers);
-    if (!embed) return;
-
-    const messageId = config.leaderboardMessageId;
-    if (messageId) {
-        try {
-            const msg = await channel.messages.fetch(messageId);
-            await msg.edit({ embeds: [embed] });
-            return;
-        } catch {
-            // Message not found — send a new one below
-        }
-    }
-
-    try {
-        const msg = await channel.send({ embeds: [embed] });
-        config.leaderboardMessageId = msg.id;
-        saveConfig(config);
-    } catch (err) {
-        console.error('Failed to send leaderboard:', err);
-    }
-}
-
-function startLeaderboardInterval() {
-    if (leaderboardInterval) clearInterval(leaderboardInterval);
-    leaderboardInterval = setInterval(updateLeaderboard, LEADERBOARD_UPDATE_INTERVAL_MS);
-    updateLeaderboard();
-}
 
 // ─── Timezone system ──────────────────────────────────────────────────────────
 
@@ -1860,18 +1241,42 @@ function reloadGiveawayTimers() {
 // ─── Invite Tracking System ───────────────────────────────────────────────────
 
 const INVITES_PATH = path.join(__dirname, 'invites.json');
+const INVITES_BACKUP_PATH = path.join(__dirname, 'invites_backup.json');
 
 function loadInvites() {
-    if (!fs.existsSync(INVITES_PATH)) return {};
-    try {
-        return JSON.parse(fs.readFileSync(INVITES_PATH, 'utf8'));
-    } catch {
-        return {};
+    if (fs.existsSync(INVITES_PATH)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(INVITES_PATH, 'utf8'));
+            if (data && Object.keys(data).length > 0) return data;
+        } catch { /* fall through */ }
     }
+    // Fall back to backup
+    if (fs.existsSync(INVITES_BACKUP_PATH)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(INVITES_BACKUP_PATH, 'utf8'));
+            if (data && Object.keys(data).length > 0) {
+                console.log('Restored invites from backup file.');
+                fs.writeFileSync(INVITES_PATH, JSON.stringify(data, null, 2), 'utf8');
+                return data;
+            }
+        } catch { /* ignore */ }
+    }
+    return {};
 }
 
 function saveInvites(data) {
     fs.writeFileSync(INVITES_PATH, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function backupInvites() {
+    try {
+        const data = loadInvites();
+        if (data && Object.keys(data).length > 0) {
+            fs.writeFileSync(INVITES_BACKUP_PATH, JSON.stringify(data, null, 2), 'utf8');
+        }
+    } catch (err) {
+        console.error('Failed to backup invites:', err);
+    }
 }
 
 // Cache of invite uses per guild: guildId → Map(inviteCode → uses)
@@ -2082,7 +1487,6 @@ function buildTypeConfigComponents(typeId) {
 const SETTINGS_DEFS = [
     { key: 'notificationChannelId', label: '📣 Restock Channel', type: 'channel', description: 'Channel for restock notifications' },
     { key: 'notificationRoleId', label: '🔔 Restock Ping Role', type: 'role', description: 'Role to ping for restocks' },
-    { key: 'leaderboardChannelId', label: '🏆 Leaderboard Channel', type: 'channel', description: 'Auto-updating leaderboard channel' },
     { key: 'orderChannelId', label: '🛒 Order Channel', type: 'channel', description: 'New order notifications channel' },
     { key: 'paidChannelId', label: '✅ Delivered Orders Channel', type: 'channel', description: 'Delivered orders channel' },
     { key: 'reviewChannelId', label: '🔍 Review Queue Channel', type: 'channel', description: 'Orders needing review channel' },
@@ -2193,9 +1597,6 @@ const client = new Client({
 client.once('ready', async () => {
     console.log(`Bot is ready! Logged in as ${client.user.tag}`);
     const config = loadConfig();
-    if (config.leaderboardChannelId) {
-        startLeaderboardInterval();
-    }
     if (config.timezoneChannelId) {
         startTimezoneInterval();
     }
@@ -2208,6 +1609,10 @@ client.once('ready', async () => {
     reloadGiveawayTimers();
     // Cache guild invites for invite tracking
     await Promise.all([...client.guilds.cache.values()].map(guild => cacheGuildInvites(guild)));
+
+    // Auto-backup invites every 10 minutes
+    setInterval(() => backupInvites(), 10 * 60 * 1000);
+    backupInvites(); // Immediate backup on startup
 
     // Live invite count sync to Base44 every 60 seconds
     setInterval(async () => {
@@ -2857,10 +2262,8 @@ client.on('interactionCreate', async interaction => {
         } else {
             const config = loadConfig();
             config[key] = channelId;
-            if (key === 'leaderboardChannelId') config.leaderboardMessageId = null;
             if (key === 'timezoneChannelId') delete config.timezoneMessageId;
             saveConfig(config);
-            if (key === 'leaderboardChannelId') startLeaderboardInterval();
             if (key === 'timezoneChannelId') startTimezoneInterval();
             if (key === 'orderChannelId') await startOrderPolling();
         }
@@ -3302,276 +2705,6 @@ client.on('interactionCreate', async interaction => {
         });
     }
 
-    // /claim
-    if (interaction.commandName === 'claim') {
-        await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0xFFA500)
-                    .setTitle('🔧 Under Maintenance')
-                    .setDescription('This feature is currently under maintenance. Please try again later.'),
-            ],
-        });
-        return;
-
-        const mcUsername = interaction.options.getString('minecraft_username');
-        const providedAmount = interaction.options.getNumber('amount');
-        const discordUsername = interaction.user.username;
-
-        await interaction.deferReply({ ephemeral: true });
-
-        // Step 1: Verify customer exists for the given Minecraft username
-        let customer;
-        try {
-            customer = await fetchCustomerByMinecraft(mcUsername);
-        } catch (err) {
-            console.error('Claim API error:', err);
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch customer data. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        if (!customer) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('❌ No Customer Found')
-                        .setDescription(`No customer found with that Minecraft username.`),
-                ],
-            });
-            return;
-        }
-
-        // Step 2: Fetch orders and verify amount
-        let orders;
-        try {
-            orders = await fetchOrdersByMinecraft(mcUsername);
-        } catch (err) {
-            console.error('Claim orders API error:', err);
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch order data. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        if (!orders || orders.length === 0) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('❌ No Orders Found')
-                        .setDescription('❌ No orders found for that Minecraft username.'),
-                ],
-            });
-            return;
-        }
-
-        // Find most recent order by sorting on known date fields
-        const sortedOrders = [...orders].sort((a, b) => getOrderDate(b) - getOrderDate(a));
-        const mostRecentOrder = sortedOrders[0];
-        const actualAmount = getOrderAmount(mostRecentOrder);
-
-        if (actualAmount === null) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ Verification Failed')
-                        .setDescription('Could not read the order amount from your most recent order. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        if (Math.abs(providedAmount - actualAmount) > 0.10) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ Verification Failed')
-                        .setDescription('❌ Verification failed. The order amount you provided doesn\'t match the most recent order for that Minecraft username. Please double-check and try again.'),
-                ],
-            });
-            return;
-        }
-
-        // Step 3: Save local mapping discord_username → minecraft_username
-        const config = loadConfig();
-        if (!config.claimedAccounts) config.claimedAccounts = {};
-        config.claimedAccounts[discordUsername] = mcUsername;
-        saveConfig(config);
-
-        // Clear cached stats so /stats shows fresh data
-        statsCache.delete(discordUsername.toLowerCase());
-
-        const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
-        const orderCount = typeof customer.order_count === 'number' ? customer.order_count : 0;
-        const tier = getTier(totalSpent);
-        const points = calcLoyaltyPoints(totalSpent);
-
-        await interaction.editReply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Account Linked!')
-                    .setDescription(
-                        `Your Discord account has been linked to the Minecraft username **${mcUsername}**.\n\nYour purchase history is now attached to your Discord profile — use \`/stats view\` to check it out!`,
-                    )
-                    .addFields(
-                        {
-                            name: '🏅 Linked Stats',
-                            value: [
-                                `**Rank:** ${tier.emoji} ${tier.name}`,
-                                `**Total Spent:** $${totalSpent.toFixed(2)}`,
-                                `**Orders:** ${orderCount}`,
-                                `**Loyalty Points:** ${points % 1 === 0 ? points : points.toFixed(1)}/100`,
-                            ].join('\n'),
-                            inline: false,
-                        },
-                    )
-                    .setFooter({ text: 'DonutDemand Bot' })
-                    .setTimestamp(),
-            ],
-        });
-        return;
-    }
-
-    // /stats
-    if (interaction.commandName === 'stats') {
-        await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0xFFA500)
-                    .setTitle('🔧 Under Maintenance')
-                    .setDescription('This feature is currently under maintenance. Please try again later.'),
-            ],
-        });
-        return;
-
-        const sub = interaction.options.getSubcommand();
-
-        // /stats private
-        if (sub === 'private') {
-            const config = loadConfig();
-            if (!config.privateStats) config.privateStats = {};
-            config.privateStats[interaction.user.id] = true;
-            saveConfig(config);
-            await interaction.reply({
-                content: '🔒 Your stats are now **private**. Only you and server admins can view them.',
-                ephemeral: true,
-            });
-            return;
-        }
-
-        // /stats public
-        if (sub === 'public') {
-            const config = loadConfig();
-            if (!config.privateStats) config.privateStats = {};
-            delete config.privateStats[interaction.user.id];
-            saveConfig(config);
-            await interaction.reply({
-                content: '🔓 Your stats are now **public**. Anyone can view them.',
-                ephemeral: true,
-            });
-            return;
-        }
-
-        // /stats view
-        const mentionedUser = interaction.options.getUser('user');
-        const username = mentionedUser.username;
-
-        // Privacy check
-        const config = loadConfig();
-        const isPrivate = config.privateStats && config.privateStats[mentionedUser.id] === true;
-        const isOwner = interaction.user.id === BOT_OWNER_ID;
-        const isSelf = interaction.user.id === mentionedUser.id;
-        const isAdmin = interaction.memberPermissions && interaction.memberPermissions.has(PermissionFlagsBits.Administrator);
-
-        if (isPrivate && !isSelf && !isAdmin && !isOwner) {
-            await interaction.reply({
-                content: `🔒 **${username}** has set their stats to private.`,
-                ephemeral: true,
-            });
-            return;
-        }
-
-        await interaction.deferReply();
-
-        // Return cached result if still fresh
-        const cached = statsCache.get(username.toLowerCase());
-        if (cached && Date.now() - cached.ts < STATS_CACHE_TTL_MS) {
-            await interaction.editReply({ embeds: [cached.embed] });
-            return;
-        }
-
-        let customer;
-        try {
-            // Fetch orders from the Order API and compute stats
-            const claimedMcUsername = config.claimedAccounts && config.claimedAccounts[username];
-            let orders;
-            if (claimedMcUsername) {
-                orders = await fetchOrdersByMinecraft(claimedMcUsername);
-            } else {
-                orders = await fetchOrdersByDiscordUsername(username);
-            }
-            if (orders.length > 0) {
-                customer = computeStatsFromOrders(orders, username);
-            } else {
-                customer = null;
-            }
-        } catch (err) {
-            console.error('Stats API error:', err);
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch order data. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        if (!customer) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('No Data Found')
-                        .setDescription(`No customer data found for **${username}**.`),
-                ],
-            });
-            return;
-        }
-
-        // Resolve the guild member from the mentioned user to get their avatar
-        let discordMember = null;
-        try {
-            discordMember = await interaction.guild.members.fetch(mentionedUser.id);
-        } catch {
-            // Non-critical — avatar just won't appear
-        }
-
-        const embed = buildStatsEmbed(customer, discordMember);
-
-        statsCache.set(username.toLowerCase(), { embed, ts: Date.now() });
-
-        await interaction.editReply({ embeds: [embed] });
-        return;
-    }
-
     // /sync
     if (interaction.commandName === 'sync') {
         await interaction.deferReply({ ephemeral: true });
@@ -3582,91 +2715,6 @@ client.on('interactionCreate', async interaction => {
             console.error('Sync failed:', err);
             await interaction.editReply({ content: '❌ Failed to sync commands.' });
         }
-        return;
-    }
-
-    // /maintenance
-    if (interaction.commandName === 'maintenance') {
-        const config = loadConfig();
-        config.statsMaintenance = !config.statsMaintenance;
-        saveConfig(config);
-        if (config.statsMaintenance) {
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle('🔧 Maintenance Mode Enabled')
-                        .setDescription('Stats, leader, and claim commands are now under maintenance. Users will see a maintenance message.'),
-                ],
-                ephemeral: true,
-            });
-        } else {
-            await interaction.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0x57F287)
-                        .setTitle('✅ Maintenance Mode Disabled')
-                        .setDescription('Stats, leader, and claim commands are now back online and will resume pulling data from the API.'),
-                ],
-                ephemeral: true,
-            });
-        }
-        return;
-    }
-
-    // /leader
-    if (interaction.commandName === 'leader') {
-        await interaction.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0xFFA500)
-                    .setTitle('🔧 Under Maintenance')
-                    .setDescription('This feature is currently under maintenance. Please try again later.'),
-            ],
-        });
-        return;
-
-        await interaction.deferReply();
-
-        // Serve from cache if still fresh
-        const cachedLeaderboard = leaderboardCache.get('leaderboard');
-        if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
-            await interaction.editReply({ embeds: [cachedLeaderboard.embed] });
-            return;
-        }
-
-        let customers;
-        try {
-            customers = await fetchAllCustomers();
-        } catch (err) {
-            console.error('Leader API error:', err);
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch customer data. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        const embed = buildLeaderboardEmbed(customers);
-
-        if (!embed) {
-            await interaction.editReply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('🏆 Top 10 Spenders')
-                        .setDescription('No leaderboard data available yet.'),
-                ],
-            });
-            return;
-        }
-
-        leaderboardCache.set('leaderboard', { embed, ts: Date.now() });
-        await interaction.editReply({ embeds: [embed] });
         return;
     }
 
@@ -4348,6 +3396,28 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    // /multiplier
+    if (interaction.commandName === 'multiplier') {
+        if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            await interaction.reply({ content: '❌ You need **Administrator** permission to use this command.', ephemeral: true });
+            return;
+        }
+        const value = interaction.options.getNumber('value');
+        const config = loadConfig();
+        config.claimMultiplier = value;
+        saveConfig(config);
+        await interaction.reply({
+            embeds: [
+                new EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle('✅ Multiplier Updated')
+                    .setDescription(`The invite rewards multiplier has been set to **${value}x**.`),
+            ],
+            ephemeral: true,
+        });
+        return;
+    }
+
     // ── /claimpanel — Configure claim rewards panel ──────────────────────────
     if (interaction.commandName === 'claimpanel') {
         const cpConf = getClaimPanelConfig(interaction.guild.id);
@@ -4500,7 +3570,9 @@ client.on('interactionCreate', async interaction => {
             return;
         }
 
-        const amount = totalInvites * 3;
+        const config = loadConfig();
+        const multiplier = config.claimMultiplier || 2;
+        const amount = totalInvites * multiplier;
 
         // POST to Money API
         try {
@@ -5963,316 +5035,6 @@ client.on('messageCreate', async message => {
         return;
     }
 
-    // ── !stats ────────────────────────────────────────────────────────────────
-    if (cmd === 'stats') {
-        await message.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0xFFA500)
-                    .setTitle('🔧 Under Maintenance')
-                    .setDescription('This feature is currently under maintenance. Please try again later.'),
-            ],
-        });
-        return;
-
-        const sub = args[0] ? args[0].toLowerCase() : null;
-
-        // !stats private
-        if (sub === 'private') {
-            const config = loadConfig();
-            if (!config.privateStats) config.privateStats = {};
-            config.privateStats[message.author.id] = true;
-            saveConfig(config);
-            await message.reply('🔒 Your stats are now **private**. Only you and server admins can view them.');
-            return;
-        }
-
-        // !stats public
-        if (sub === 'public') {
-            const config = loadConfig();
-            if (!config.privateStats) config.privateStats = {};
-            delete config.privateStats[message.author.id];
-            saveConfig(config);
-            await message.reply('🔓 Your stats are now **public**. Anyone can view them.');
-            return;
-        }
-
-        // !stats @user  (or !stats view @user)
-        let mentionedUser = message.mentions.users.first();
-        if (!mentionedUser) {
-            await message.reply('❌ Usage: `!stats @user`, `!stats private`, or `!stats public`');
-            return;
-        }
-        const username = mentionedUser.username;
-
-        // Privacy check
-        const config = loadConfig();
-        const isPrivate = config.privateStats && config.privateStats[mentionedUser.id] === true;
-        const isOwner = message.author.id === BOT_OWNER_ID;
-        const isSelf = message.author.id === mentionedUser.id;
-        const isAdmin = message.member && message.member.permissions.has(PermissionFlagsBits.Administrator);
-
-        if (isPrivate && !isSelf && !isAdmin && !isOwner) {
-            await message.reply(`🔒 **${username}** has set their stats to private.`);
-            return;
-        }
-
-        // Return cached result if still fresh
-        const cached = statsCache.get(username.toLowerCase());
-        if (cached && Date.now() - cached.ts < STATS_CACHE_TTL_MS) {
-            await message.reply({ embeds: [cached.embed] });
-            return;
-        }
-
-        let customer;
-        try {
-            const claimedMcUsername = config.claimedAccounts && config.claimedAccounts[username];
-            let orders;
-            if (claimedMcUsername) {
-                orders = await fetchOrdersByMinecraft(claimedMcUsername);
-            } else {
-                orders = await fetchOrdersByDiscordUsername(username);
-            }
-            if (orders.length > 0) {
-                customer = computeStatsFromOrders(orders, username);
-            } else {
-                customer = null;
-            }
-        } catch (err) {
-            console.error('Stats API error:', err);
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch order data. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        if (!customer) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('No Data Found')
-                        .setDescription(`No customer data found for **${username}**.`),
-                ],
-            });
-            return;
-        }
-
-        let discordMember = null;
-        try {
-            discordMember = await message.guild.members.fetch(mentionedUser.id);
-        } catch {
-            // Non-critical
-        }
-
-        const embed = buildStatsEmbed(customer, discordMember);
-        statsCache.set(username.toLowerCase(), { embed, ts: Date.now() });
-        await message.reply({ embeds: [embed] });
-        return;
-    }
-
-    // ── !leader ───────────────────────────────────────────────────────────────
-    if (cmd === 'leader') {
-        await message.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0xFFA500)
-                    .setTitle('🔧 Under Maintenance')
-                    .setDescription('This feature is currently under maintenance. Please try again later.'),
-            ],
-        });
-        return;
-
-        const cachedLeaderboard = leaderboardCache.get('leaderboard');
-        if (cachedLeaderboard && Date.now() - cachedLeaderboard.ts < LEADERBOARD_CACHE_TTL_MS) {
-            await message.reply({ embeds: [cachedLeaderboard.embed] });
-            return;
-        }
-
-        let customers;
-        try {
-            customers = await fetchAllCustomers();
-        } catch (err) {
-            console.error('Leader API error:', err);
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch customer data. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        const embed = buildLeaderboardEmbed(customers);
-        if (!embed) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('🏆 Top 10 Spenders')
-                        .setDescription('No leaderboard data available yet.'),
-                ],
-            });
-            return;
-        }
-
-        leaderboardCache.set('leaderboard', { embed, ts: Date.now() });
-        await message.reply({ embeds: [embed] });
-        return;
-    }
-
-    // ── !claim <minecraft_username> <amount> ──────────────────────────────────
-    if (cmd === 'claim') {
-        await message.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0xFFA500)
-                    .setTitle('🔧 Under Maintenance')
-                    .setDescription('This feature is currently under maintenance. Please try again later.'),
-            ],
-        });
-        return;
-
-        const mcUsername = args[0];
-        const providedAmount = parseFloat(args[1]);
-
-        if (!mcUsername || isNaN(providedAmount) || providedAmount < 0) {
-            await message.reply('❌ Usage: `!claim <minecraft_username> <amount>`');
-            return;
-        }
-
-        const discordUsername = message.author.username;
-
-        let customer;
-        try {
-            customer = await fetchCustomerByMinecraft(mcUsername);
-        } catch (err) {
-            console.error('Claim API error:', err);
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch customer data. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        if (!customer) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('❌ No Customer Found')
-                        .setDescription('No customer found with that Minecraft username.'),
-                ],
-            });
-            return;
-        }
-
-        let orders;
-        try {
-            orders = await fetchOrdersByMinecraft(mcUsername);
-        } catch (err) {
-            console.error('Claim orders API error:', err);
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ API Unreachable')
-                        .setDescription('Could not fetch order data. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        if (!orders || orders.length === 0) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xFEE75C)
-                        .setTitle('❌ No Orders Found')
-                        .setDescription('No orders found for that Minecraft username.'),
-                ],
-            });
-            return;
-        }
-
-        const sortedOrders = [...orders].sort((a, b) => getOrderDate(b) - getOrderDate(a));
-        const mostRecentOrder = sortedOrders[0];
-        const actualAmount = getOrderAmount(mostRecentOrder);
-
-        if (actualAmount === null) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ Verification Failed')
-                        .setDescription('Could not read the order amount from your most recent order. Please try again later.'),
-                ],
-            });
-            return;
-        }
-
-        if (Math.abs(providedAmount - actualAmount) > 0.10) {
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0xED4245)
-                        .setTitle('❌ Verification Failed')
-                        .setDescription('The order amount you provided doesn\'t match the most recent order for that Minecraft username. Please double-check and try again.'),
-                ],
-            });
-            return;
-        }
-
-        const config = loadConfig();
-        if (!config.claimedAccounts) config.claimedAccounts = {};
-        config.claimedAccounts[discordUsername] = mcUsername;
-        saveConfig(config);
-
-        statsCache.delete(discordUsername.toLowerCase());
-
-        const totalSpent = typeof customer.total_spent === 'number' ? customer.total_spent : 0;
-        const orderCount = typeof customer.order_count === 'number' ? customer.order_count : 0;
-        const tier = getTier(totalSpent);
-        const points = calcLoyaltyPoints(totalSpent);
-
-        await message.reply({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle('✅ Account Linked!')
-                    .setDescription(
-                        `Your Discord account has been linked to the Minecraft username **${mcUsername}**.\n\nYour purchase history is now attached to your Discord profile — use \`!stats @you\` to check it out!`,
-                    )
-                    .addFields(
-                        {
-                            name: '🏅 Linked Stats',
-                            value: [
-                                `**Rank:** ${tier.emoji} ${tier.name}`,
-                                `**Total Spent:** $${totalSpent.toFixed(2)}`,
-                                `**Orders:** ${orderCount}`,
-                                `**Loyalty Points:** ${points % 1 === 0 ? points : points.toFixed(1)}/100`,
-                            ].join('\n'),
-                            inline: false,
-                        },
-                    )
-                    .setFooter({ text: 'DonutDemand Bot' })
-                    .setTimestamp(),
-            ],
-        });
-        return;
-    }
-
     // ── !sync (Administrator only) ────────────────────────────────────────────
     if (cmd === 'sync') {
         if (!message.member || !message.member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -6503,32 +5265,7 @@ client.on('messageCreate', async message => {
             return;
         }
 
-        // !settings leader-channel #channel
-        if (sub === 'leader-channel') {
-            const channel = message.mentions.channels.first();
-            if (!channel) {
-                await message.reply('❌ Usage: `!settings leader-channel #channel`');
-                return;
-            }
-            const config = loadConfig();
-            config.leaderboardChannelId = channel.id;
-            config.leaderboardMessageId = null;
-            saveConfig(config);
-            startLeaderboardInterval();
-            await message.reply({
-                embeds: [
-                    new EmbedBuilder()
-                        .setColor(0x57F287)
-                        .setTitle('✅ Leaderboard Channel Set')
-                        .setDescription(
-                            `The auto-updating leaderboard will be posted in <#${channel.id}> and refreshed every 10 minutes.`,
-                        ),
-                ],
-            });
-            return;
-        }
-
-        await message.reply('❌ Usage: `!settings channel #channel`, `!settings role @role`, or `!settings leader-channel #channel`');
+        await message.reply('❌ Usage: `!settings channel #channel` or `!settings role @role`');
         return;
     }
 
